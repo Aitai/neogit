@@ -35,8 +35,36 @@ end, {
 api.nvim_create_user_command("NeogitCommit", function(args)
   local commit = args.fargs[1] or "HEAD"
   local CommitViewBuffer = require("neogit.buffers.commit_view")
+
+  -- Ensure Neogit is properly initialized for syntax highlighting
+  local neogit = require("neogit")
+  if not neogit.config then
+    neogit.setup {}
+  end
+
   CommitViewBuffer.new(commit):open()
 end, {
   nargs = "?",
   desc = "Open git commit view for specified commit, or HEAD",
+})
+
+api.nvim_create_user_command("NeogitBlameSplit", function(args)
+  local file_path = args.fargs[1] or vim.fn.expand("%:p")
+  local BlameSplitBuffer = require("neogit.buffers.blame_split")
+
+  -- Ensure Neogit is properly initialized for syntax highlighting
+  local neogit = require("neogit")
+  if not neogit.config then
+    neogit.setup {}
+  end
+
+  if BlameSplitBuffer.is_open() then
+    BlameSplitBuffer.instance:close()
+  else
+    BlameSplitBuffer.new(file_path):open()
+  end
+end, {
+  nargs = "?",
+  desc = "Toggle git blame split for current file or specified file",
+  complete = "file",
 })

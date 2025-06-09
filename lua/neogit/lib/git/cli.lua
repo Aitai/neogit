@@ -324,11 +324,15 @@ local runner = require("neogit.runner")
 
 ---@class GitCommandBisect: GitCommandBuilder
 
+---@class GitCommandBlame: GitCommandBuilder
+---@field porcelain self
+
 ---@class NeogitGitCLI
 ---@field absorb         GitCommandAbsorb
 ---@field add            GitCommandAdd
 ---@field apply          GitCommandApply
 ---@field bisect         GitCommandBisect
+---@field blame          GitCommandBlame
 ---@field branch         GitCommandBranch
 ---@field checkout       GitCommandCheckout
 ---@field checkout-index GitCommandCheckoutIndex
@@ -972,6 +976,12 @@ local configurations = {
   ["verify-commit"] = config {},
 
   ["bisect"] = config {},
+
+  blame = config {
+    flags = {
+      porcelain = "--porcelain",
+    },
+  },
 }
 
 --- NOTE: Use require("neogit.lib.git").repo.worktree_root instead of calling this function.
