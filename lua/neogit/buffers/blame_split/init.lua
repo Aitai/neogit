@@ -15,9 +15,9 @@ local fn = vim.fn
 ---@field original_wrap boolean|nil
 ---@field saved_width number
 ---@field initial_cursor_line number
----@field original_buffer_content string[]|nil
 ---@field original_buffer_name string|nil
----@field current_commit string|nil
+---@field history_stack table[] Stack of {commit: string, type: "reblame"|"parent", line: number}
+---@field history_index number Current position in history stack (1-based)
 local M = {
   instance = nil,
 }
@@ -136,10 +136,8 @@ local function _render_info_line(hunk, commit_color, window_width)
     local available_width = window_width - date_width - 2
 
     if prefix_width > available_width then
-      -- FIX: Use prefix_width (a number) for arithmetic, not prefix (a string). This solves the crash.
       local overflow = prefix_width - available_width
       author = vim.fn.strcharpart(author, 0, fn.strchars(author) - overflow)
-      -- Recalculate after truncation
       prefix_str = string.format("┍ %s %s", commit_short, author)
       prefix_width = fn.strdisplaywidth(prefix_str)
     end
@@ -148,7 +146,6 @@ local function _render_info_line(hunk, commit_color, window_width)
       text(commit_short, { highlight = commit_color }),
       text(" " .. author),
     }
-    -- FIX: Use the correctly calculated display width for alignment.
     prefix_len = prefix_width
   end
 
@@ -169,7 +166,6 @@ local function _render_summary_line(hunk, commit_color, window_width, is_last_li
   local text, row = Ui.text, Ui.row
   local summary = hunk.summary
   local symbol = is_last_line and "┕ " or "│ "
-  -- FIX: Use strdisplaywidth for correct layout calculations.
   local symbol_width = fn.strdisplaywidth(symbol)
   local available_width = window_width - symbol_width
   local summary_width = fn.strdisplaywidth(summary)
@@ -194,12 +190,113 @@ end
 ---@return table UI component
 local function _render_filler_line(symbol, commit_color, window_width)
   local text, row = Ui.text, Ui.row
-  -- FIX: Use strdisplaywidth for correct padding calculation.
   local symbol_width = fn.strdisplaywidth(symbol)
   return row {
     text(symbol, { highlight = commit_color }),
     text(string.rep(" ", window_width - symbol_width)),
   }
+end
+
+--
+-- History Management
+--
+
+--- Add a new entry to the history stack
+---@param self BlameSplitBuffer
+---@param commit string
+---@param operation_type string "reblame" or "parent"
+---@param line number
+function M:push_history(commit, operation_type, line)
+  -- Check if we're trying to add the same commit as the current one
+  if self.history_index > 0 and self.history_index <= #self.history_stack then
+    local current_entry = self.history_stack[self.history_index]
+    if current_entry.commit == commit then
+      -- Don't add duplicate commit to history, just update the line position
+      current_entry.line = line
+      return
+    end
+  end
+
+  -- Remove any entries after current position (when going back and then taking a new path)
+  for i = self.history_index + 1, #self.history_stack do
+    self.history_stack[i] = nil
+  end
+
+  -- Add new entry
+  table.insert(self.history_stack, {
+    commit = commit,
+    type = operation_type,
+    line = line,
+  })
+  self.history_index = #self.history_stack
+end
+
+--- Check if we can go back in history
+---@param self BlameSplitBuffer
+---@return boolean
+function M:can_go_back()
+  return self.history_index > 1
+end
+
+--- Check if we can go forward in history
+---@param self BlameSplitBuffer
+---@return boolean
+function M:can_go_forward()
+  return self.history_index < #self.history_stack
+end
+
+--- Go back in history
+---@param self BlameSplitBuffer
+---@return boolean success
+function M:go_back()
+  if not self:can_go_back() then
+    vim.notify("Already at the beginning of blame history", vim.log.levels.INFO, { title = "Blame" })
+    return false
+  end
+
+  self.history_index = self.history_index - 1
+  local entry = self.history_stack[self.history_index]
+  self:reblame_without_history(entry.commit, entry.line)
+  return true
+end
+
+--- Go forward in history
+---@param self BlameSplitBuffer
+---@return boolean success
+function M:go_forward()
+  if not self:can_go_forward() then
+    vim.notify("Already at the end of blame history", vim.log.levels.INFO, { title = "Blame" })
+    return false
+  end
+
+  self.history_index = self.history_index + 1
+  local entry = self.history_stack[self.history_index]
+  self:reblame_without_history(entry.commit, entry.line)
+  return true
+end
+
+--- Navigate to parent commit of the current line
+---@param self BlameSplitBuffer
+---@param line_nr number
+---@param add_to_history boolean
+function M:goto_parent(line_nr, add_to_history)
+  local entry = self:get_blame_entry_for_line(line_nr)
+  if not entry then
+    return
+  end
+
+  local parent_commit = entry.commit .. "^"
+
+  if add_to_history then
+    -- Update the current history entry's line position before adding new entry
+    if self.history_index > 0 and self.history_index <= #self.history_stack then
+      self.history_stack[self.history_index].line = line_nr
+    end
+
+    self:push_history(parent_commit, "parent", line_nr)
+  end
+
+  self:reblame_without_history(parent_commit, line_nr)
 end
 
 --
@@ -213,8 +310,6 @@ function M.new(file_path)
     file_path = file_path:sub(#git_root + 2)
   end
 
-  -- NOTE: The assumption is that git.blame.blame_file() with one argument
-  -- is equivalent to blaming at HEAD.
   local blame_entries, err = git.blame.blame_file(file_path)
 
   if not blame_entries then
@@ -241,6 +336,8 @@ function M.new(file_path)
     commit_colors = {},
     next_color_index = 1,
     saved_width = 60,
+    history_stack = {}, -- Will be initialized in open() with correct cursor position
+    history_index = 0,
   }
   setmetatable(instance, { __index = M })
   return instance
@@ -283,7 +380,18 @@ function M:get_blame_entry_for_line(line_nr)
   return nil
 end
 
---- Store the original buffer content and name
+--- Check if the file buffer has unsaved changes
+---@param self BlameSplitBuffer
+---@return boolean
+function M:check_unsaved_changes()
+  if not self.file_buffer or not api.nvim_buf_is_valid(self.file_buffer) then
+    return false
+  end
+
+  return api.nvim_get_option_value("modified", { buf = self.file_buffer })
+end
+
+--- Store the original buffer name before modifying it
 ---@param self BlameSplitBuffer
 function M:store_original_buffer_state()
   if not self.file_buffer or not api.nvim_buf_is_valid(self.file_buffer) then
@@ -293,6 +401,9 @@ function M:store_original_buffer_state()
   -- Only store if we haven't already stored the original state
   if not self.original_buffer_content then
     self.original_buffer_content = api.nvim_buf_get_lines(self.file_buffer, 0, -1, false)
+
+  -- Only store if we haven't already stored the original name
+  if not self.original_buffer_name then
     self.original_buffer_name = api.nvim_buf_get_name(self.file_buffer)
   end
 end
@@ -305,7 +416,7 @@ function M:update_file_buffer_content(commit)
     return
   end
 
-  -- Store original state if not already stored
+  -- Store original name if not already stored, so we can restore it on close
   self:store_original_buffer_state()
 
   -- Get file content at the specified commit
@@ -333,47 +444,17 @@ function M:update_file_buffer_content(commit)
   local git_dir = git.repo.git_dir
   local new_name = string.format("neogit://%s//%s:%s", git_dir, commit, self.file_path)
   api.nvim_buf_set_name(self.file_buffer, new_name)
-
-  -- Store current commit
-  self.current_commit = commit
 end
 
---- Restore the original buffer content and name
----@param self BlameSplitBuffer
-function M:restore_original_buffer_content()
-  if not self.file_buffer or not api.nvim_buf_is_valid(self.file_buffer) then
-    return
-  end
-
-  if not self.original_buffer_content or not self.original_buffer_name then
-    return
-  end
-
-  -- Restore original content
-  api.nvim_buf_set_option(self.file_buffer, "modifiable", true)
-  api.nvim_buf_set_lines(self.file_buffer, 0, -1, false, self.original_buffer_content)
-  api.nvim_buf_set_option(self.file_buffer, "modifiable", true)
-  api.nvim_buf_set_option(self.file_buffer, "modified", false)
-
-  -- Restore original name
-  api.nvim_buf_set_name(self.file_buffer, self.original_buffer_name)
-
-  -- Clear stored state
-  self.original_buffer_content = nil
-  self.original_buffer_name = nil
-  self.current_commit = nil
-end
-
---- Re-runs the blame for the given file at a specific commit.
+--- Re-runs the blame for the given file at a specific commit without adding to history.
 ---@param self BlameSplitBuffer
 ---@param commit string The commit SHA or revision string (e.g., "HEAD^") to blame at.
 ---@param original_line number The line number to try to restore the cursor to.
-function M:reblame(commit, original_line)
+function M:reblame_without_history(commit, original_line)
   if not commit then
     return
   end
 
-  -- The core call, assuming git.blame.blame_file is updated to take a commit
   local new_blame_entries, err = git.blame.blame_file(self.file_path, commit)
 
   if not new_blame_entries or #new_blame_entries == 0 then
@@ -400,6 +481,9 @@ function M:reblame(commit, original_line)
   -- Rerender
   self.buffer.ui:render(unpack(self:render_blame_lines()))
 
+  -- Clear any previous status messages on successful operation
+  vim.cmd("echon ''")
+
   -- Restore cursor position
   vim.defer_fn(function()
     if self.buffer and api.nvim_buf_is_valid(self.buffer.handle) then
@@ -412,6 +496,27 @@ function M:reblame(commit, original_line)
       end)
     end
   end, 10)
+end
+
+--- Re-runs the blame for the given file at a specific commit and adds to history.
+---@param self BlameSplitBuffer
+---@param commit string The commit SHA or revision string (e.g., "HEAD^") to blame at.
+---@param original_line number The line number to try to restore the cursor to.
+function M:reblame(commit, original_line)
+  if not commit then
+    return
+  end
+
+  -- Update the current history entry's line position before adding new entry
+  if self.history_index > 0 and self.history_index <= #self.history_stack then
+    self.history_stack[self.history_index].line = original_line
+  end
+
+  -- Add to history
+  self:push_history(commit, "reblame", original_line)
+
+  -- Perform the actual reblame
+  self:reblame_without_history(commit, original_line)
 end
 
 function M:setup_scroll_sync()
@@ -460,7 +565,7 @@ function M:setup_scroll_sync()
         return
       end
 
-      local scrolled_win = tonumber(args.match)
+      local scrolled_win = tonumber(args.match) -- args.match is the window-ID for WinScrolled
       if not (scrolled_win and api.nvim_win_is_valid(scrolled_win)) then
         return
       end
@@ -473,10 +578,7 @@ function M:setup_scroll_sync()
       if target_buf then
         local target_win_id = fn.bufwinid(target_buf)
         if target_win_id > 0 and api.nvim_win_is_valid(target_win_id) then
-          -- Get the view by executing winsaveview() *in the scrolled window*
           local view = api.nvim_win_call(scrolled_win, fn.winsaveview)
-
-          -- Restore the view by executing winrestview() *in the target window*
           api.nvim_win_call(target_win_id, function()
             fn.winrestview(view)
           end)
@@ -494,11 +596,9 @@ function M:setup_resize_handling()
     pattern = "*",
     callback = function()
       if self.buffer and self.buffer:is_visible() and fn.bufwinid(self.buffer.handle) > 0 then
-        -- Check if the width actually changed to avoid unnecessary re-renders
         local current_width = _get_current_width(self)
         if current_width ~= self.saved_width then
           self.saved_width = current_width
-          -- The fix is here: unpack the results
           self.buffer.ui:render(unpack(self:render_blame_lines()))
         end
       end
@@ -508,8 +608,17 @@ function M:setup_resize_handling()
 end
 
 function M:close()
-  -- Restore original buffer content before closing
-  self:restore_original_buffer_content()
+  local original_path = self.original_buffer_name
+
+  if original_path and self.file_buffer and api.nvim_buf_is_valid(self.file_buffer) then
+    local winid = fn.bufwinid(self.file_buffer)
+    if winid and winid > 0 and api.nvim_win_is_valid(winid) then
+
+      api.nvim_win_call(winid, function()
+        vim.cmd("edit! " .. fn.fnameescape(original_path))
+      end)
+    end
+  end
 
   if self.buffer then
     self.buffer:close()
@@ -576,7 +685,6 @@ function M:open()
               vim.defer_fn(function()
                 if api.nvim_win_is_valid(blame_win) then
                   pcall(api.nvim_win_set_width, blame_win, self.saved_width)
-
                   api.nvim_win_set_option(blame_win, "winfixwidth", false)
                 end
               end, 10)
@@ -585,7 +693,16 @@ function M:open()
 
           commit_view:open()
         end,
+        -- Reblame operations (with history)
         r = function()
+          if self:check_unsaved_changes() then
+            vim.notify(
+              "Cannot reblame: buffer has unsaved changes. Save or discard changes first.",
+              vim.log.levels.WARN,
+              { title = "Blame" }
+            )
+            return
+          end
           local line_nr = api.nvim_win_get_cursor(0)[1]
           local entry = self:get_blame_entry_for_line(line_nr)
           if not entry then
@@ -593,13 +710,40 @@ function M:open()
           end
           self:reblame(entry.commit, line_nr)
         end,
+        -- Go back in history (alternative key)
         R = function()
-          local line_nr = api.nvim_win_get_cursor(0)[1]
-          local entry = self:get_blame_entry_for_line(line_nr)
-          if not entry then
+          self:go_back()
+        end,
+        -- Parent operations (with history)
+        p = function()
+          if self:check_unsaved_changes() then
+            vim.notify(
+              "Cannot navigate to parent: buffer has unsaved changes. Save or discard changes first.",
+              vim.log.levels.WARN,
+              { title = "Blame" }
+            )
             return
           end
-          self:reblame(entry.commit .. "^", line_nr)
+          local line_nr = api.nvim_win_get_cursor(0)[1]
+          self:goto_parent(line_nr, true)
+        end,
+        -- Go back in history (alternative key)
+        P = function()
+          self:go_back()
+        end,
+        -- History navigation
+        ["<C-o>"] = function()
+          self:go_back()
+        end,
+        ["<C-i>"] = function()
+          self:go_forward()
+        end,
+        -- Alternative history navigation
+        ["["] = function()
+          self:go_back()
+        end,
+        ["]"] = function()
+          self:go_forward()
         end,
       },
     },
@@ -613,6 +757,12 @@ function M:open()
 
       self:setup_scroll_sync()
       self:setup_resize_handling()
+
+      -- Initialize history stack with correct cursor position
+      if #self.history_stack == 0 then
+        self.history_stack = { { commit = "HEAD", type = "initial", line = self.initial_cursor_line } }
+        self.history_index = 1
+      end
 
       -- Restore cursor position
       vim.defer_fn(function()
