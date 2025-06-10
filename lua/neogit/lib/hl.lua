@@ -309,6 +309,7 @@ function M.setup(config)
     -- Blame split highlights
     NeogitBlameDate                = { fg = palette.cyan, bold = palette.bold },
     NeogitBlameMessage             = { fg = palette.grey },
+    NeogitBlameMessageBold         = { fg = palette.grey, bold = palette.bold },
     NeogitBlameCommit1             = { fg = palette.red },
     NeogitBlameCommit2             = { fg = palette.green },
     NeogitBlameCommit3             = { fg = palette.blue },
@@ -317,6 +318,15 @@ function M.setup(config)
     NeogitBlameCommit6             = { fg = palette.cyan },
     NeogitBlameCommit7             = { fg = palette.orange },
     NeogitBlameCommit8             = { fg = palette.white },
+    -- Bold variants for selected commit highlighting
+    NeogitBlameCommit1Bold         = { fg = palette.red, bold = palette.bold },
+    NeogitBlameCommit2Bold         = { fg = palette.green, bold = palette.bold },
+    NeogitBlameCommit3Bold         = { fg = palette.blue, bold = palette.bold },
+    NeogitBlameCommit4Bold         = { fg = palette.yellow, bold = palette.bold },
+    NeogitBlameCommit5Bold         = { fg = palette.purple, bold = palette.bold },
+    NeogitBlameCommit6Bold         = { fg = palette.cyan, bold = palette.bold },
+    NeogitBlameCommit7Bold         = { fg = palette.orange, bold = palette.bold },
+    NeogitBlameCommit8Bold         = { fg = palette.white, bold = palette.bold },
   }
 
   for group, hl in pairs(hl_store) do
