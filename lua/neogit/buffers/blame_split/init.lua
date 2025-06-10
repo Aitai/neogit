@@ -15,6 +15,7 @@ local fn = vim.fn
 ---@field next_color_index number
 ---@field original_wrap boolean|nil
 ---@field saved_width number|nil
+---@field initial_cursor_line number|nil
 local M = {
   instance = nil,
 }
@@ -440,6 +441,9 @@ function M:open()
 
   -- Find the current file buffer to sync with
   self.file_buffer = api.nvim_get_current_buf()
+  
+  -- Capture the current cursor position to remember it
+  self.initial_cursor_line = api.nvim_win_get_cursor(0)[1]
 
   -- Store original wrap setting and disable wrapping in file buffer
   self.original_wrap = vim.wo.wrap
@@ -526,6 +530,26 @@ function M:open()
       
       -- Set up resize handling
       self:setup_resize_handling()
+      
+      -- Position cursor at the remembered line from when blame split was opened
+      if self.initial_cursor_line and buffer.win_handle then
+        vim.defer_fn(function()
+          if api.nvim_win_is_valid(buffer.win_handle) then
+            -- Ensure the line number is within bounds
+            local line_count = api.nvim_buf_line_count(buffer.handle)
+            local target_line = math.min(self.initial_cursor_line, line_count)
+            target_line = math.max(1, target_line)
+            
+            -- Set cursor position in blame window
+            pcall(api.nvim_win_set_cursor, buffer.win_handle, { target_line, 0 })
+            
+            -- Center the line in the window
+            api.nvim_win_call(buffer.win_handle, function()
+              vim.cmd("normal! zz")
+            end)
+          end
+        end, 10) -- Small delay to ensure buffer is fully rendered
+      end
     end,
   }
 end
