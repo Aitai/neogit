@@ -31,19 +31,6 @@ end
 
 ---@param name string Syntax group name.
 ---@return string|nil
-local function get_fg(name)
-  local color = vim.api.nvim_get_hl(0, { name = name })
-  if color["link"] then
-    return get_fg(color["link"])
-  elseif color["reverse"] and color["bg"] then
-    return "#" .. to_hex(color["bg"])
-  elseif color["fg"] then
-    return "#" .. to_hex(color["fg"])
-  end
-end
-
----@param name string Syntax group name.
----@return string|nil
 local function get_bg(name)
   local color = vim.api.nvim_get_hl(0, { name = name })
   if color["link"] then
@@ -79,6 +66,22 @@ end
 ---@field purple     string  Foreground purple
 ---@field bg_purple  string  Background purple
 ---@field md_purple  string  Background _medium_ purple. Lighter than bg_purple.
+---@field teal       string  Foreground teal - distinct blue-green
+---@field bg_teal    string  Background teal
+---@field magenta    string  Foreground magenta - bright pink-purple
+---@field bg_magenta string  Background magenta
+---@field lime       string  Foreground lime - bright yellow-green
+---@field bg_lime    string  Background lime
+---@field coral      string  Foreground coral - warm red-orange
+---@field bg_coral   string  Background coral
+---@field azure      string  Foreground azure - light blue
+---@field bg_azure   string  Background azure
+---@field rose       string  Foreground rose - soft pink
+---@field bg_rose    string  Background rose
+---@field mint       string  Foreground mint - light cyan-green
+---@field bg_mint    string  Background mint
+---@field amber      string  Foreground amber - warm yellow
+---@field bg_amber   string  Background amber
 ---@field italic     boolean enable italics?
 ---@field bold       boolean enable bold?
 ---@field underline  boolean enable underline?
@@ -89,13 +92,22 @@ end
 local function make_palette(config)
   local bg        = Color.from_hex(get_bg("Normal") or (vim.o.bg == "dark" and "#22252A" or "#eeeeee"))
   local fg        = Color.from_hex((vim.o.bg == "dark" and "#fcfcfc" or "#22252A"))
-  local red       = Color.from_hex(config.highlight.red    or get_fg("Error")       or "#E06C75")
-  local orange    = Color.from_hex(config.highlight.orange or get_fg("SpecialChar") or "#ffcb6b")
-  local yellow    = Color.from_hex(config.highlight.yellow or get_fg("PreProc")     or "#FFE082")
-  local green     = Color.from_hex(config.highlight.green  or get_fg("String")      or "#C3E88D")
-  local cyan      = Color.from_hex(config.highlight.cyan   or get_fg("Operator")    or "#89ddff")
-  local blue      = Color.from_hex(config.highlight.blue   or get_fg("Macro")       or "#82AAFF")
-  local purple    = Color.from_hex(config.highlight.purple or get_fg("Include")     or "#C792EA")
+  local red     = Color.from_hex(config.highlight.red     or "#f7768e")
+  local orange  = Color.from_hex(config.highlight.orange  or "#ff9e64")
+  local yellow  = Color.from_hex(config.highlight.yellow  or "#e0af68")
+  local green   = Color.from_hex(config.highlight.green   or "#9ece6a")
+  local cyan    = Color.from_hex(config.highlight.cyan    or "#7dcfff")
+  local blue    = Color.from_hex(config.highlight.blue    or "#7aa2f7")
+  local purple  = Color.from_hex(config.highlight.purple  or "#bb9af7")
+  local teal    = Color.from_hex(config.highlight.teal    or "#1abc9c")
+  local magenta = Color.from_hex(config.highlight.magenta or "#ff007c")
+  local lime    = Color.from_hex(config.highlight.lime    or "#73daca")
+  local coral   = Color.from_hex(config.highlight.coral   or "#db4b4b")
+  local azure   = Color.from_hex(config.highlight.azure   or "#89ddff")
+  local rose    = Color.from_hex(config.highlight.rose    or "#fca7ea")
+  local mint    = Color.from_hex(config.highlight.mint    or "#0db9d7")
+  local amber   = Color.from_hex(config.highlight.amber   or "#ffc777")
+
 
   local bg_factor = vim.o.bg == "dark" and 1 or -1
 
@@ -123,6 +135,22 @@ local function make_palette(config)
     purple     = purple:to_css(),
     bg_purple  = purple:shade(bg_factor * -0.18):to_css(),
     md_purple  = purple:shade(0.18):to_css(),
+    teal       = teal:to_css(),
+    bg_teal    = teal:shade(bg_factor * -0.18):to_css(),
+    magenta    = magenta:to_css(),
+    bg_magenta = magenta:shade(bg_factor * -0.18):to_css(),
+    lime       = lime:to_css(),
+    bg_lime    = lime:shade(bg_factor * -0.18):to_css(),
+    coral      = coral:to_css(),
+    bg_coral   = coral:shade(bg_factor * -0.18):to_css(),
+    azure      = azure:to_css(),
+    bg_azure   = azure:shade(bg_factor * -0.18):to_css(),
+    rose       = rose:to_css(),
+    bg_rose    = rose:shade(bg_factor * -0.18):to_css(),
+    mint       = mint:to_css(),
+    bg_mint    = mint:shade(bg_factor * -0.18):to_css(),
+    amber      = amber:to_css(),
+    bg_amber   = amber:shade(bg_factor * -0.18):to_css(),
     italic     = true,
     bold       = true,
     underline  = true,
@@ -308,8 +336,8 @@ function M.setup(config)
     NeogitActiveItem               = { bg = palette.bg_orange, fg = palette.bg0, bold = palette.bold },
     -- Blame split highlights
     NeogitBlameDate                = { fg = palette.cyan, bold = palette.bold },
-    NeogitBlameMessage             = { fg = palette.grey },
-    NeogitBlameMessageBold         = { fg = palette.grey, bold = palette.bold },
+    NeogitBlameMessage             = { fg = palette.grey, italic = palette.italic },
+    NeogitBlameMessageBold         = { fg = palette.grey, bold = palette.bold, italic = palette.italic },
     NeogitBlameCommit1             = { fg = palette.red },
     NeogitBlameCommit2             = { fg = palette.green },
     NeogitBlameCommit3             = { fg = palette.blue },
@@ -318,6 +346,14 @@ function M.setup(config)
     NeogitBlameCommit6             = { fg = palette.cyan },
     NeogitBlameCommit7             = { fg = palette.orange },
     NeogitBlameCommit8             = { fg = palette.white },
+    NeogitBlameCommit9             = { fg = palette.teal },
+    NeogitBlameCommit10            = { fg = palette.magenta },
+    NeogitBlameCommit11            = { fg = palette.lime },
+    NeogitBlameCommit12            = { fg = palette.coral },
+    NeogitBlameCommit13            = { fg = palette.azure },
+    NeogitBlameCommit14            = { fg = palette.rose },
+    NeogitBlameCommit15            = { fg = palette.mint },
+    NeogitBlameCommit16            = { fg = palette.amber },
     -- Bold variants for selected commit highlighting
     NeogitBlameCommit1Bold         = { fg = palette.red, bold = palette.bold },
     NeogitBlameCommit2Bold         = { fg = palette.green, bold = palette.bold },
@@ -327,6 +363,14 @@ function M.setup(config)
     NeogitBlameCommit6Bold         = { fg = palette.cyan, bold = palette.bold },
     NeogitBlameCommit7Bold         = { fg = palette.orange, bold = palette.bold },
     NeogitBlameCommit8Bold         = { fg = palette.white, bold = palette.bold },
+    NeogitBlameCommit9Bold         = { fg = palette.teal, bold = palette.bold },
+    NeogitBlameCommit10Bold        = { fg = palette.magenta, bold = palette.bold },
+    NeogitBlameCommit11Bold        = { fg = palette.lime, bold = palette.bold },
+    NeogitBlameCommit12Bold        = { fg = palette.coral, bold = palette.bold },
+    NeogitBlameCommit13Bold        = { fg = palette.azure, bold = palette.bold },
+    NeogitBlameCommit14Bold        = { fg = palette.rose, bold = palette.bold },
+    NeogitBlameCommit15Bold        = { fg = palette.mint, bold = palette.bold },
+    NeogitBlameCommit16Bold        = { fg = palette.amber, bold = palette.bold },
   }
 
   for group, hl in pairs(hl_store) do

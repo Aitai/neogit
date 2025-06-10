@@ -175,6 +175,22 @@ end
 ---@field purple?     string  Foreground purple
 ---@field bg_purple?  string  Background purple
 ---@field md_purple?  string  Background _medium_ purple. Lighter than bg_purple. Used for hunk headers.
+---@field teal?       string  Foreground teal - distinct blue-green
+---@field bg_teal?    string  Background teal
+---@field magenta?    string  Foreground magenta - bright pink-purple
+---@field bg_magenta? string  Background magenta
+---@field lime?       string  Foreground lime - bright yellow-green
+---@field bg_lime?    string  Background lime
+---@field coral?      string  Foreground coral - warm red-orange
+---@field bg_coral?   string  Background coral
+---@field azure?      string  Foreground azure - light blue
+---@field bg_azure?   string  Background azure
+---@field rose?       string  Foreground rose - soft pink
+---@field bg_rose?    string  Background rose
+---@field mint?       string  Foreground mint - light cyan-green
+---@field bg_mint?    string  Background mint
+---@field amber?      string  Foreground amber - warm yellow
+---@field bg_amber?   string  Background amber
 
 ---@class NeogitFilewatcherConfig
 ---@field enabled boolean

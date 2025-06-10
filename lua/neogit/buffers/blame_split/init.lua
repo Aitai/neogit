@@ -34,6 +34,33 @@ local COMMIT_COLORS = {
   "NeogitBlameCommit6",
   "NeogitBlameCommit7",
   "NeogitBlameCommit8",
+  "NeogitBlameCommit9",
+  "NeogitBlameCommit10",
+  "NeogitBlameCommit11",
+  "NeogitBlameCommit12",
+  "NeogitBlameCommit13",
+  "NeogitBlameCommit14",
+  "NeogitBlameCommit15",
+  "NeogitBlameCommit16",
+}
+
+local COMMIT_COLORS_BOLD = {
+  "NeogitBlameCommit1Bold",
+  "NeogitBlameCommit2Bold",
+  "NeogitBlameCommit3Bold",
+  "NeogitBlameCommit4Bold",
+  "NeogitBlameCommit5Bold",
+  "NeogitBlameCommit6Bold",
+  "NeogitBlameCommit7Bold",
+  "NeogitBlameCommit8Bold",
+  "NeogitBlameCommit9Bold",
+  "NeogitBlameCommit10Bold",
+  "NeogitBlameCommit11Bold",
+  "NeogitBlameCommit12Bold",
+  "NeogitBlameCommit13Bold",
+  "NeogitBlameCommit14Bold",
+  "NeogitBlameCommit15Bold",
+  "NeogitBlameCommit16Bold",
 }
 
 local COMMIT_COLORS_BOLD = {
