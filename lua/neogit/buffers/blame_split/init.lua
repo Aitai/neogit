@@ -54,7 +54,7 @@ function M.new(file_path)
     commit_colors = {},
     next_color_index = 1,
     buffer = nil,
-    saved_width = 40, -- Default width
+    saved_width = 60, -- Default width
   }
 
   setmetatable(instance, { __index = M })
@@ -74,11 +74,21 @@ function M:get_commit_color(commit)
   return self.commit_colors[commit]
 end
 
+---Get the current window width for the blame buffer
+---@return number Current window width
+function M:get_current_width()
+  if self.buffer and self.buffer.win_handle and api.nvim_win_is_valid(self.buffer.win_handle) then
+    return api.nvim_win_get_width(self.buffer.win_handle)
+  end
+  return self.saved_width or 60
+end
+
 ---Format a blame line according to the specification
 ---@param entry BlameEntry
 ---@param line_in_hunk number Line number within this blame entry (1-based)
+---@param window_width number Current window width
 ---@return string, table[] Formatted line and highlight information
-function M:format_blame_line(entry, line_in_hunk)
+function M:format_blame_line(entry, line_in_hunk, window_width)
   local commit_short = blame.abbreviate_commit(entry.commit)
   local date = blame.format_date(entry.author_time)
   local author = entry.author
@@ -95,20 +105,20 @@ function M:format_blame_line(entry, line_in_hunk)
     -- Single line: show dash and commit info, right-align date
     local summary = entry.summary
     local prefix = string.format("- %s %s ", commit_short, author)
-    local available_width = 40 - #prefix - #date - 1 -- 1 for space before date
+    local available_width = window_width - #prefix - #date - 1 -- 1 for space before date
 
     if #summary > available_width then
-      summary = summary:sub(1, available_width - 3) .. "..."
+      summary = summary:sub(1, math.max(0, available_width - 3)) .. "..."
     end
 
-    -- Ensure exact 40 character width with right-aligned date
+    -- Ensure exact window_width character width with right-aligned date
     local content = prefix .. summary
     local total_content_length = #content + #date
-    local padding = 40 - total_content_length
+    local padding = window_width - total_content_length
     if padding < 1 then
       -- If content is too long, truncate summary further
-      local excess = total_content_length - 39 -- 39 to leave at least 1 space
-      summary = summary:sub(1, #summary - excess)
+      local excess = total_content_length - window_width + 1 -- +1 to leave at least 1 space
+      summary = summary:sub(1, math.max(0, #summary - excess))
       content = prefix .. summary
       padding = 1
     end
@@ -123,57 +133,61 @@ function M:format_blame_line(entry, line_in_hunk)
       { 2, 2 + #commit_short, self:get_commit_color(entry.commit) }, -- Commit
       { 2 + #commit_short + 1, 2 + #commit_short + 1 + #author, "Normal" }, -- Author
       { message_start, message_end, "NeogitBlameMessage" }, -- Message
-      { 40 - #date, 40, "NeogitBlameDate" }, -- Date (always at the end)
+      { window_width - #date, window_width, "NeogitBlameDate" }, -- Date (always at the end)
     }
   elseif is_first_line then
     -- First line of multi-line hunk: show commit info with right-aligned date
-    local prefix = string.format("┍ %s %s", commit_short, author)
-    local total_content_length = #prefix + #date
-    local padding = 40 - total_content_length
+    local content_without_date = string.format("┍ %s %s", commit_short, author)
+    local total_content_length = #content_without_date + #date - 2 -- -2 to move date 2 chars right
+    local padding = window_width - total_content_length
     if padding < 1 then
       -- Truncate author name if necessary
-      local excess = total_content_length - 39
-      author = author:sub(1, #author - excess)
-      prefix = string.format("┍ %s %s", commit_short, author)
-      padding = 1
+      local excess = total_content_length - window_width + 1
+      author = author:sub(1, math.max(0, #author - excess))
+      content_without_date = string.format("┍ %s %s", commit_short, author)
+      total_content_length = #content_without_date + #date - 2
+      padding = window_width - total_content_length
+      if padding < 1 then
+        padding = 1
+      end
     end
 
-    line = prefix .. string.rep(" ", padding) .. date
+    line = content_without_date .. string.rep(" ", padding) .. date
 
     highlights = {
       { 0, 2, self:get_commit_color(entry.commit) }, -- Symbol
       { 2, 2 + #commit_short, self:get_commit_color(entry.commit) }, -- Commit
       { 2 + #commit_short + 1, 2 + #commit_short + 1 + #author, "Normal" }, -- Author
-      { 40 - #date, 40, "NeogitBlameDate" }, -- Date (always at the end)
+      { window_width - #date, window_width, "NeogitBlameDate" }, -- Date (always at the end)
     }
   elseif is_second_line then
     -- Second line: show commit message with appropriate symbol
     local summary = entry.summary
     local symbol = is_last_line and "┕ " or "│ "
-    local available_width = 40 - #symbol
+    local available_width = window_width - #symbol
 
     if #summary > available_width then
-      summary = summary:sub(1, available_width - 3) .. "..."
+      summary = summary:sub(1, math.max(0, available_width - 3)) .. "..."
     end
 
     line = symbol .. summary
-    -- Pad to exactly 40 characters
-    line = line .. string.rep(" ", 40 - #line)
+    -- Pad to exactly window_width characters
+    line = line .. string.rep(" ", window_width - #line)
 
     highlights = {
       { 0, #symbol, self:get_commit_color(entry.commit) }, -- Symbol
       { #symbol, #symbol + #summary, "NeogitBlameMessage" }, -- Message
     }
   elseif is_last_line then
-    -- Last line: just the symbol, pad to exactly 40 characters
-    line = "┕" .. string.rep(" ", 39)
+    -- Last line: just the symbol, pad to exactly window_width characters
+    line = "┕" .. string.rep(" ", window_width - 1)
 
     highlights = {
       { 0, 1, self:get_commit_color(entry.commit) }, -- Symbol
     }
   else
-    -- Middle line: pad to exactly 40 characters
-    line = "│" .. string.rep(" ", 39)
+    -- Middle line: pad to exactly window_width characters
+    line = "│" .. string.rep(" ", window_width - 1)
 
     highlights = {
       { 0, 1, self:get_commit_color(entry.commit) }, -- Symbol
@@ -188,6 +202,7 @@ end
 function M:generate_blame_content()
   local lines = {}
   local all_highlights = {}
+  local window_width = self:get_current_width()
 
   -- Group consecutive lines by commit to create hunks
   local hunks = {}
@@ -222,7 +237,7 @@ function M:generate_blame_content()
   -- Generate blame lines from hunks
   for _, hunk in ipairs(hunks) do
     for i = 1, hunk.line_count do
-      local line, highlights = self:format_blame_line(hunk, i)
+      local line, highlights = self:format_blame_line(hunk, i, window_width)
       table.insert(lines, line)
 
       -- Adjust highlight positions for the current line
@@ -371,6 +386,33 @@ function M:setup_scroll_sync()
   })
 end
 
+---Set up window resize handling to refresh content when window is resized
+function M:setup_resize_handling()
+  if not self.buffer or not self.buffer.handle then
+    return
+  end
+
+  local blame_buf = self.buffer.handle
+
+  -- Handle window resize events
+  api.nvim_create_autocmd("WinResized", {
+    callback = function()
+      -- Check if the resized window contains our blame buffer
+      local blame_wins = fn.win_findbuf(blame_buf)
+      if #blame_wins > 0 then
+        -- Refresh the buffer content to adapt to new width
+        vim.defer_fn(function()
+          if self.buffer and self.buffer:is_visible() then
+            -- Re-render the buffer content with the new width
+            self.buffer.ui:render(unpack(self:render_blame_lines()))
+          end
+        end, 10) -- Small delay to ensure window dimensions are settled
+      end
+    end,
+    group = self.buffer.autocmd_group,
+  })
+end
+
 ---Close the blame split
 function M:close()
   if self.buffer then
@@ -481,6 +523,9 @@ function M:open()
 
       -- Set up scroll synchronization
       self:setup_scroll_sync()
+      
+      -- Set up resize handling
+      self:setup_resize_handling()
     end,
   }
 end
@@ -491,6 +536,7 @@ function M:render_blame_lines()
   local text = Ui.text
   local row = Ui.row
   local components = {}
+  local window_width = self:get_current_width()
 
   -- Group consecutive lines by commit to create hunks
   local hunks = {}
@@ -539,20 +585,20 @@ function M:render_blame_lines()
         -- Single line: show commit message after commit info, right-align date
         local summary = hunk.summary
         local prefix = string.format("- %s %s ", commit_short, author)
-        local available_width = 40 - #prefix - #date - 1 -- 1 for space before date
+        local available_width = window_width - #prefix - #date - 1 -- 1 for space before date
 
         if #summary > available_width then
-          summary = summary:sub(1, available_width - 3) .. "..."
+          summary = summary:sub(1, math.max(0, available_width - 3)) .. "..."
         end
 
-        -- Ensure exact 40 character width with right-aligned date
+        -- Ensure exact window_width character width with right-aligned date
         local content = prefix .. summary
         local total_content_length = #content + #date
-        local padding = 40 - total_content_length
+        local padding = window_width - total_content_length
         if padding < 1 then
           -- If content is too long, truncate summary further
-          local excess = total_content_length - 39 -- 39 to leave at least 1 space
-          summary = summary:sub(1, #summary - excess)
+          local excess = total_content_length - window_width + 1 -- +1 to leave at least 1 space
+          summary = summary:sub(1, math.max(0, #summary - excess))
           content = prefix .. summary
           padding = 1
         end
@@ -570,15 +616,19 @@ function M:render_blame_lines()
         )
       elseif is_first_line then
         -- First line of multi-line hunk: show commit info with right-aligned date
-        local prefix = string.format("┍ %s %s", commit_short, author)
-        local total_content_length = #prefix + #date
-        local padding = 40 - total_content_length
+        local content_without_date = "┍ " .. commit_short .. " " .. author
+        local total_content_length = #content_without_date + #date - 2 -- -2 to move date 2 chars right
+        local padding = window_width - total_content_length
         if padding < 1 then
           -- Truncate author name if necessary
-          local excess = total_content_length - 39
-          author = author:sub(1, #author - excess)
-          prefix = string.format("┍ %s %s", commit_short, author)
-          padding = 1
+          local excess = total_content_length - window_width + 1
+          author = author:sub(1, math.max(0, #author - excess))
+          content_without_date = "┍ " .. commit_short .. " " .. author
+          total_content_length = #content_without_date + #date - 2
+          padding = window_width - total_content_length
+          if padding < 1 then
+            padding = 1
+          end
         end
 
         table.insert(
@@ -595,13 +645,13 @@ function M:render_blame_lines()
         -- Second line: show commit message with appropriate symbol
         local summary = hunk.summary
         local symbol = is_last_line and "┕ " or "│ "
-        local available_width = 40 - #symbol
+        local available_width = window_width - #symbol
 
         if #summary > available_width then
-          summary = summary:sub(1, available_width - 3) .. "..."
+          summary = summary:sub(1, math.max(0, available_width - 3)) .. "..."
         end
 
-        local padding_needed = 40 - #symbol - #summary
+        local padding_needed = window_width - #symbol - #summary
 
         table.insert(
           components,
@@ -612,21 +662,21 @@ function M:render_blame_lines()
           }
         )
       elseif is_last_line then
-        -- Last line: just the symbol, pad to exactly 40 characters
+        -- Last line: just the symbol, pad to exactly window_width characters
         table.insert(
           components,
           row {
             text("┕", { highlight = commit_color }),
-            text(string.rep(" ", 39)),
+            text(string.rep(" ", window_width - 1)),
           }
         )
       else
-        -- Middle line: pad to exactly 40 characters
+        -- Middle line: pad to exactly window_width characters
         table.insert(
           components,
           row {
             text("│", { highlight = commit_color }),
-            text(string.rep(" ", 39)),
+            text(string.rep(" ", window_width - 1)),
           }
         )
       end
