@@ -14,6 +14,7 @@ local fn = vim.fn
 ---@field commit_colors table<string, string>
 ---@field next_color_index number
 ---@field original_wrap boolean|nil
+---@field saved_width number|nil
 local M = {
   instance = nil,
 }
@@ -53,6 +54,7 @@ function M.new(file_path)
     commit_colors = {},
     next_color_index = 1,
     buffer = nil,
+    saved_width = 40, -- Default width
   }
 
   setmetatable(instance, { __index = M })
@@ -90,9 +92,9 @@ function M:format_blame_line(entry, line_in_hunk)
   local line, highlights
 
   if is_single_line then
-    -- Single line: show commit message after commit info, right-align date
+    -- Single line: show dash and commit info, right-align date
     local summary = entry.summary
-    local prefix = string.format("┍ %s %s ", commit_short, author)
+    local prefix = string.format("- %s %s ", commit_short, author)
     local available_width = 40 - #prefix - #date - 1 -- 1 for space before date
 
     if #summary > available_width then
@@ -145,22 +147,22 @@ function M:format_blame_line(entry, line_in_hunk)
       { 40 - #date, 40, "NeogitBlameDate" }, -- Date (always at the end)
     }
   elseif is_second_line then
-    -- Second line: show commit message, pad to exactly 40 characters
+    -- Second line: show commit message with appropriate symbol
     local summary = entry.summary
-    local prefix = "┍ "
-    local available_width = 40 - #prefix
+    local symbol = is_last_line and "┕ " or "│ "
+    local available_width = 40 - #symbol
 
     if #summary > available_width then
       summary = summary:sub(1, available_width - 3) .. "..."
     end
 
-    line = prefix .. summary
+    line = symbol .. summary
     -- Pad to exactly 40 characters
     line = line .. string.rep(" ", 40 - #line)
 
     highlights = {
-      { 0, 2, self:get_commit_color(entry.commit) }, -- Symbol
-      { 2, 2 + #summary, "NeogitBlameMessage" }, -- Message
+      { 0, #symbol, self:get_commit_color(entry.commit) }, -- Symbol
+      { #symbol, #symbol + #summary, "NeogitBlameMessage" }, -- Message
     }
   elseif is_last_line then
     -- Last line: just the symbol, pad to exactly 40 characters
@@ -238,42 +240,18 @@ function M:generate_blame_content()
   return lines, all_highlights
 end
 
----Set up window width maintenance to ensure blame split stays at 40 columns
-function M:setup_width_maintenance()
-  if not self.buffer or not self.buffer.win_handle then
-    return
+---Save the current width of the blame window
+function M:save_current_width()
+  if self.buffer and self.buffer.win_handle and api.nvim_win_is_valid(self.buffer.win_handle) then
+    self.saved_width = api.nvim_win_get_width(self.buffer.win_handle)
   end
+end
 
-  local blame_win = self.buffer.win_handle
-
-  -- Monitor window events to maintain width
-  api.nvim_create_autocmd({ "WinResized", "WinNew", "WinClosed", "BufWinEnter", "BufWinLeave" }, {
-    callback = function()
-      -- Check if the blame window still exists and is valid
-      if api.nvim_win_is_valid(blame_win) then
-        local current_width = api.nvim_win_get_width(blame_win)
-        if current_width ~= 40 then
-          pcall(api.nvim_win_set_width, blame_win, 40)
-        end
-      end
-    end,
-    group = self.buffer.autocmd_group,
-  })
-
-  -- Also monitor when other buffers open/close to maintain width
-  api.nvim_create_autocmd({ "BufEnter", "BufLeave" }, {
-    callback = function()
-      vim.defer_fn(function()
-        if api.nvim_win_is_valid(blame_win) then
-          local current_width = api.nvim_win_get_width(blame_win)
-          if current_width ~= 40 then
-            pcall(api.nvim_win_set_width, blame_win, 40)
-          end
-        end
-      end, 10) -- Small delay to let window layout settle
-    end,
-    group = self.buffer.autocmd_group,
-  })
+---Restore the saved width of the blame window
+function M:restore_saved_width()
+  if self.buffer and self.buffer.win_handle and api.nvim_win_is_valid(self.buffer.win_handle) then
+    pcall(api.nvim_win_set_width, self.buffer.win_handle, self.saved_width)
+  end
 end
 
 ---Set up scroll synchronization between blame and file buffers
@@ -441,8 +419,16 @@ function M:open()
           local line_nr = api.nvim_win_get_cursor(0)[1]
           local entry = self:get_blame_entry_for_line(line_nr)
           if entry then
+            -- Save current width before opening commit view
+            self:save_current_width()
+            
             -- Store the current blame window to return focus to it later
             local blame_win = api.nvim_get_current_win()
+
+            -- Set winfixwidth to prevent the blame window from being resized
+            if api.nvim_win_is_valid(blame_win) then
+              api.nvim_win_set_option(blame_win, "winfixwidth", true)
+            end
 
             local CommitViewBuffer = require("neogit.buffers.commit_view")
             local commit_view = CommitViewBuffer.new(entry.commit)
@@ -455,9 +441,15 @@ function M:open()
                 original_close(cv)
               end
 
-              -- Return focus to the blame window if it's still valid
+              -- Return focus to the blame window if it's still valid and restore settings
               if api.nvim_win_is_valid(blame_win) then
                 api.nvim_set_current_win(blame_win)
+                -- Unset winfixwidth to allow normal resizing again
+                api.nvim_win_set_option(blame_win, "winfixwidth", false)
+                -- Use defer_fn to ensure window layout has settled before restoring width
+                vim.defer_fn(function()
+                  self:restore_saved_width()
+                end, 10)
               end
             end
 
@@ -476,13 +468,12 @@ function M:open()
       return self:render_blame_lines()
     end,
     after = function(buffer)
-      -- Set window width to exactly 40 characters
+      -- Set window width to saved width (default 40 characters)
       if buffer.win_handle then
-        api.nvim_win_set_width(buffer.win_handle, 40)
+        api.nvim_win_set_width(buffer.win_handle, self.saved_width)
         -- Disable line wrapping to prevent cursor synchronization issues
         api.nvim_win_set_option(buffer.win_handle, "wrap", false)
-        -- Set window options to prevent resizing
-        api.nvim_win_set_option(buffer.win_handle, "winfixwidth", true)
+        -- Allow resizing by not setting winfixwidth
       end
 
       -- Assign the buffer to self so setup_scroll_sync can access it
@@ -490,9 +481,6 @@ function M:open()
 
       -- Set up scroll synchronization
       self:setup_scroll_sync()
-
-      -- Set up window width maintenance
-      self:setup_width_maintenance()
     end,
   }
 end
@@ -550,7 +538,7 @@ function M:render_blame_lines()
       if is_single_line then
         -- Single line: show commit message after commit info, right-align date
         local summary = hunk.summary
-        local prefix = string.format("┍ %s %s ", commit_short, author)
+        local prefix = string.format("- %s %s ", commit_short, author)
         local available_width = 40 - #prefix - #date - 1 -- 1 for space before date
 
         if #summary > available_width then
@@ -572,7 +560,7 @@ function M:render_blame_lines()
         table.insert(
           components,
           row {
-            text("┍ ", { highlight = commit_color }),
+            text("- ", { highlight = commit_color }),
             text(commit_short, { highlight = commit_color }),
             text(" " .. author .. " "),
             text(summary, { highlight = "NeogitBlameMessage" }),
@@ -604,21 +592,21 @@ function M:render_blame_lines()
           }
         )
       elseif is_second_line then
-        -- Second line: show commit message, pad to exactly 40 characters
+        -- Second line: show commit message with appropriate symbol
         local summary = hunk.summary
-        local prefix = "┍ "
-        local available_width = 40 - #prefix
+        local symbol = is_last_line and "┕ " or "│ "
+        local available_width = 40 - #symbol
 
         if #summary > available_width then
           summary = summary:sub(1, available_width - 3) .. "..."
         end
 
-        local padding_needed = 40 - #prefix - #summary
+        local padding_needed = 40 - #symbol - #summary
 
         table.insert(
           components,
           row {
-            text("┍ ", { highlight = commit_color }),
+            text(symbol, { highlight = commit_color }),
             text(summary, { highlight = "NeogitBlameMessage" }),
             text(string.rep(" ", padding_needed)),
           }
