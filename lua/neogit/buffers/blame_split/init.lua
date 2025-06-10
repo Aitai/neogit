@@ -34,6 +34,14 @@ local COMMIT_COLORS = {
   "NeogitBlameCommit6",
   "NeogitBlameCommit7",
   "NeogitBlameCommit8",
+  "NeogitBlameCommit9",
+  "NeogitBlameCommit10",
+  "NeogitBlameCommit11",
+  "NeogitBlameCommit12",
+  "NeogitBlameCommit13",
+  "NeogitBlameCommit14",
+  "NeogitBlameCommit15",
+  "NeogitBlameCommit16",
 }
 
 local COMMIT_COLORS_BOLD = {
@@ -45,6 +53,14 @@ local COMMIT_COLORS_BOLD = {
   "NeogitBlameCommit6Bold",
   "NeogitBlameCommit7Bold",
   "NeogitBlameCommit8Bold",
+  "NeogitBlameCommit9Bold",
+  "NeogitBlameCommit10Bold",
+  "NeogitBlameCommit11Bold",
+  "NeogitBlameCommit12Bold",
+  "NeogitBlameCommit13Bold",
+  "NeogitBlameCommit14Bold",
+  "NeogitBlameCommit15Bold",
+  "NeogitBlameCommit16Bold",
 }
 
 --
@@ -970,4 +986,3 @@ function M:open()
 end
 
 return M
-
