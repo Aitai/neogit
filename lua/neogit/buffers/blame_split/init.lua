@@ -63,17 +63,6 @@ local COMMIT_COLORS_BOLD = {
   "NeogitBlameCommit16Bold",
 }
 
-local COMMIT_COLORS_BOLD = {
-  "NeogitBlameCommit1Bold",
-  "NeogitBlameCommit2Bold",
-  "NeogitBlameCommit3Bold",
-  "NeogitBlameCommit4Bold",
-  "NeogitBlameCommit5Bold",
-  "NeogitBlameCommit6Bold",
-  "NeogitBlameCommit7Bold",
-  "NeogitBlameCommit8Bold",
-}
-
 --
 -- Private Helper Functions
 --
@@ -997,4 +986,3 @@ function M:open()
 end
 
 return M
-
