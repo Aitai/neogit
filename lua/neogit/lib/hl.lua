@@ -306,6 +306,17 @@ function M.setup(config)
     NeogitFloatHeader              = { bg = palette.bg0, bold = palette.bold },
     NeogitFloatHeaderHighlight     = { bg = palette.bg2, fg = palette.cyan, bold = palette.bold },
     NeogitActiveItem               = { bg = palette.bg_orange, fg = palette.bg0, bold = palette.bold },
+    -- Blame split highlights
+    NeogitBlameDate                = { fg = palette.cyan, bold = palette.bold },
+    NeogitBlameMessage             = { fg = palette.grey },
+    NeogitBlameCommit1             = { fg = palette.red },
+    NeogitBlameCommit2             = { fg = palette.green },
+    NeogitBlameCommit3             = { fg = palette.blue },
+    NeogitBlameCommit4             = { fg = palette.yellow },
+    NeogitBlameCommit5             = { fg = palette.purple },
+    NeogitBlameCommit6             = { fg = palette.cyan },
+    NeogitBlameCommit7             = { fg = palette.orange },
+    NeogitBlameCommit8             = { fg = palette.white },
   }
 
   for group, hl in pairs(hl_store) do
