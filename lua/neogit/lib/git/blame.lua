@@ -1,5 +1,6 @@
 local git = require("neogit.lib.git")
 
+---@class NeogitGitBlame
 local M = {}
 
 ---@class BlameEntry

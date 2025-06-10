@@ -1,6 +1,7 @@
 ---@class NeogitGitLib
 ---@field repo        NeogitRepo
 ---@field bisect      NeogitGitBisect
+---@field blame       NeogitGitBlame
 ---@field branch      NeogitGitBranch
 ---@field cherry      NeogitGitCherry
 ---@field cherry_pick NeogitGitCherryPick

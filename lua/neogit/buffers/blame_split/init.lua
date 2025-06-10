@@ -1,6 +1,5 @@
 local Buffer = require("neogit.lib.buffer")
 local git = require("neogit.lib.git")
-local blame = require("neogit.lib.git.blame")
 local Ui = require("neogit.lib.ui")
 
 local api = vim.api
@@ -105,8 +104,8 @@ end
 ---@return table UI component
 local function _render_info_line(hunk, commit_color, window_width)
   local text, row = Ui.text, Ui.row
-  local commit_short = blame.abbreviate_commit(hunk.commit)
-  local date = blame.format_date(hunk.author_time)
+  local commit_short = git.blame.abbreviate_commit(hunk.commit)
+  local date = git.blame.format_date(hunk.author_time)
   local author = hunk.author
   local date_width = fn.strdisplaywidth(date)
 
@@ -214,9 +213,9 @@ function M.new(file_path)
     file_path = file_path:sub(#git_root + 2)
   end
 
-  -- NOTE: The assumption is that blame.blame_file() with one argument
+  -- NOTE: The assumption is that git.blame.blame_file() with one argument
   -- is equivalent to blaming at HEAD.
-  local blame_entries, err = blame.blame_file(file_path)
+  local blame_entries, err = git.blame.blame_file(file_path)
 
   if not blame_entries then
     local error_message = "Neogit: Git blame failed for " .. file_path
@@ -290,7 +289,7 @@ function M:store_original_buffer_state()
   if not self.file_buffer or not api.nvim_buf_is_valid(self.file_buffer) then
     return
   end
-  
+
   -- Only store if we haven't already stored the original state
   if not self.original_buffer_content then
     self.original_buffer_content = api.nvim_buf_get_lines(self.file_buffer, 0, -1, false)
@@ -311,12 +310,12 @@ function M:update_file_buffer_content(commit)
 
   -- Get file content at the specified commit
   local ok, result = pcall(function()
-    return git.cli.show.file(self.file_path, commit).call({ hidden = true, trim = false })
+    return git.cli.show.file(self.file_path, commit).call { hidden = true, trim = false }
   end)
 
   if not ok or result.code ~= 0 then
     vim.notify(
-      "Failed to get file content at commit " .. blame.abbreviate_commit(commit),
+      "Failed to get file content at commit " .. git.blame.abbreviate_commit(commit),
       vim.log.levels.WARN,
       { title = "Blame" }
     )
@@ -331,7 +330,6 @@ function M:update_file_buffer_content(commit)
   api.nvim_buf_set_option(self.file_buffer, "modified", false)
 
   -- Update buffer name to indicate the commit being viewed
-  local git_root = git.repo.worktree_root
   local git_dir = git.repo.git_dir
   local new_name = string.format("neogit://%s//%s:%s", git_dir, commit, self.file_path)
   api.nvim_buf_set_name(self.file_buffer, new_name)
@@ -375,19 +373,17 @@ function M:reblame(commit, original_line)
     return
   end
 
-  -- The core call, assuming blame.blame_file is updated to take a commit
-  local new_blame_entries, err = blame.blame_file(self.file_path, commit)
+  -- The core call, assuming git.blame.blame_file is updated to take a commit
+  local new_blame_entries, err = git.blame.blame_file(self.file_path, commit)
 
   if not new_blame_entries or #new_blame_entries == 0 then
-    local short_commit_str = blame.abbreviate_commit(commit)
-    local error_message = "Neogit: Re-blame failed for "
-      .. self.file_path
-      .. " at "
-      .. short_commit_str
+    local short_commit_str = git.blame.abbreviate_commit(commit)
+    local error_message = "Neogit: Re-blame failed for " .. self.file_path .. " at " .. short_commit_str
     if err and err ~= "" then
       error_message = error_message .. ".\n\nDetails:\n" .. err
     else
-      error_message = error_message .. ". The commit might not exist or the file may not exist at that commit."
+      error_message = error_message
+        .. ". The commit might not exist or the file may not exist at that commit."
     end
     vim.notify(error_message, vim.log.levels.ERROR, { title = "Blame Error" })
     return
@@ -458,9 +454,6 @@ function M:setup_scroll_sync()
     group = self.buffer.autocmd_group,
   })
 
-  --[[
-    THIS IS THE CORRECTED SECTION
-  --]]
   api.nvim_create_autocmd("WinScrolled", {
     callback = function(args)
       if syncing then
@@ -517,7 +510,7 @@ end
 function M:close()
   -- Restore original buffer content before closing
   self:restore_original_buffer_content()
-  
+
   if self.buffer then
     self.buffer:close()
   end
