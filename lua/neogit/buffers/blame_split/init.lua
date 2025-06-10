@@ -16,6 +16,9 @@ local fn = vim.fn
 ---@field original_wrap boolean|nil
 ---@field saved_width number
 ---@field initial_cursor_line number
+---@field original_buffer_content string[]|nil
+---@field original_buffer_name string|nil
+---@field current_commit string|nil
 local M = {
   instance = nil,
 }
@@ -211,6 +214,8 @@ function M.new(file_path)
     file_path = file_path:sub(#git_root + 2)
   end
 
+  -- NOTE: The assumption is that blame.blame_file() with one argument
+  -- is equivalent to blaming at HEAD.
   local blame_entries, err = blame.blame_file(file_path)
 
   if not blame_entries then
@@ -277,6 +282,140 @@ function M:get_blame_entry_for_line(line_nr)
     return self.blame_entries[line_nr]
   end
   return nil
+end
+
+--- Store the original buffer content and name
+---@param self BlameSplitBuffer
+function M:store_original_buffer_state()
+  if not self.file_buffer or not api.nvim_buf_is_valid(self.file_buffer) then
+    return
+  end
+  
+  -- Only store if we haven't already stored the original state
+  if not self.original_buffer_content then
+    self.original_buffer_content = api.nvim_buf_get_lines(self.file_buffer, 0, -1, false)
+    self.original_buffer_name = api.nvim_buf_get_name(self.file_buffer)
+  end
+end
+
+--- Update the file buffer with content from a specific commit
+---@param self BlameSplitBuffer
+---@param commit string The commit to show content from
+function M:update_file_buffer_content(commit)
+  if not self.file_buffer or not api.nvim_buf_is_valid(self.file_buffer) then
+    return
+  end
+
+  -- Store original state if not already stored
+  self:store_original_buffer_state()
+
+  -- Get file content at the specified commit
+  local ok, result = pcall(function()
+    return git.cli.show.file(self.file_path, commit).call({ hidden = true, trim = false })
+  end)
+
+  if not ok or result.code ~= 0 then
+    vim.notify(
+      "Failed to get file content at commit " .. blame.abbreviate_commit(commit),
+      vim.log.levels.WARN,
+      { title = "Blame" }
+    )
+    return
+  end
+
+  -- Update buffer content
+  local content = result.stdout
+  api.nvim_buf_set_option(self.file_buffer, "modifiable", true)
+  api.nvim_buf_set_lines(self.file_buffer, 0, -1, false, content)
+  api.nvim_buf_set_option(self.file_buffer, "modifiable", false)
+  api.nvim_buf_set_option(self.file_buffer, "modified", false)
+
+  -- Update buffer name to indicate the commit being viewed
+  local git_root = git.repo.worktree_root
+  local git_dir = git.repo.git_dir
+  local new_name = string.format("neogit://%s//%s:%s", git_dir, commit, self.file_path)
+  api.nvim_buf_set_name(self.file_buffer, new_name)
+
+  -- Store current commit
+  self.current_commit = commit
+end
+
+--- Restore the original buffer content and name
+---@param self BlameSplitBuffer
+function M:restore_original_buffer_content()
+  if not self.file_buffer or not api.nvim_buf_is_valid(self.file_buffer) then
+    return
+  end
+
+  if not self.original_buffer_content or not self.original_buffer_name then
+    return
+  end
+
+  -- Restore original content
+  api.nvim_buf_set_option(self.file_buffer, "modifiable", true)
+  api.nvim_buf_set_lines(self.file_buffer, 0, -1, false, self.original_buffer_content)
+  api.nvim_buf_set_option(self.file_buffer, "modifiable", true)
+  api.nvim_buf_set_option(self.file_buffer, "modified", false)
+
+  -- Restore original name
+  api.nvim_buf_set_name(self.file_buffer, self.original_buffer_name)
+
+  -- Clear stored state
+  self.original_buffer_content = nil
+  self.original_buffer_name = nil
+  self.current_commit = nil
+end
+
+--- Re-runs the blame for the given file at a specific commit.
+---@param self BlameSplitBuffer
+---@param commit string The commit SHA or revision string (e.g., "HEAD^") to blame at.
+---@param original_line number The line number to try to restore the cursor to.
+function M:reblame(commit, original_line)
+  if not commit then
+    return
+  end
+
+  -- The core call, assuming blame.blame_file is updated to take a commit
+  local new_blame_entries, err = blame.blame_file(self.file_path, commit)
+
+  if not new_blame_entries or #new_blame_entries == 0 then
+    local short_commit_str = blame.abbreviate_commit(commit)
+    local error_message = "Neogit: Re-blame failed for "
+      .. self.file_path
+      .. " at "
+      .. short_commit_str
+    if err and err ~= "" then
+      error_message = error_message .. ".\n\nDetails:\n" .. err
+    else
+      error_message = error_message .. ". The commit might not exist or the file may not exist at that commit."
+    end
+    vim.notify(error_message, vim.log.levels.ERROR, { title = "Blame Error" })
+    return
+  end
+
+  -- Update the file buffer with content from the commit
+  self:update_file_buffer_content(commit)
+
+  -- Update state
+  self.blame_entries = new_blame_entries
+  self.commit_colors = {}
+  self.next_color_index = 1
+
+  -- Rerender
+  self.buffer.ui:render(unpack(self:render_blame_lines()))
+
+  -- Restore cursor position
+  vim.defer_fn(function()
+    if self.buffer and api.nvim_buf_is_valid(self.buffer.handle) then
+      local line_count = api.nvim_buf_line_count(self.buffer.handle)
+      local target_line = math.min(original_line, line_count)
+      pcall(api.nvim_win_set_cursor, 0, { math.max(1, target_line), 0 })
+      -- Center the view on the new cursor position
+      api.nvim_win_call(0, function()
+        vim.cmd("normal! zz")
+      end)
+    end
+  end, 10)
 end
 
 function M:setup_scroll_sync()
@@ -376,6 +515,9 @@ function M:setup_resize_handling()
 end
 
 function M:close()
+  -- Restore original buffer content before closing
+  self:restore_original_buffer_content()
+  
   if self.buffer then
     self.buffer:close()
   end
@@ -449,6 +591,22 @@ function M:open()
           end
 
           commit_view:open()
+        end,
+        r = function()
+          local line_nr = api.nvim_win_get_cursor(0)[1]
+          local entry = self:get_blame_entry_for_line(line_nr)
+          if not entry then
+            return
+          end
+          self:reblame(entry.commit, line_nr)
+        end,
+        R = function()
+          local line_nr = api.nvim_win_get_cursor(0)[1]
+          local entry = self:get_blame_entry_for_line(line_nr)
+          if not entry then
+            return
+          end
+          self:reblame(entry.commit .. "^", line_nr)
         end,
       },
     },
