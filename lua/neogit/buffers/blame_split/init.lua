@@ -15,12 +15,9 @@ local fn = vim.fn
 ---@field original_wrap boolean|nil
 ---@field saved_width number
 ---@field initial_cursor_line number
----@field original_buffer_content string[]|nil
 ---@field original_buffer_name string|nil
--- Removed: ---@field current_commit string|nil
 ---@field history_stack table[] Stack of {commit: string, type: "reblame"|"parent", line: number}
 ---@field history_index number Current position in history stack (1-based)
----@field has_unsaved_changes boolean
 local M = {
   instance = nil,
 }
@@ -390,20 +387,19 @@ function M:check_unsaved_changes()
   if not self.file_buffer or not api.nvim_buf_is_valid(self.file_buffer) then
     return false
   end
-  
+
   return api.nvim_get_option_value("modified", { buf = self.file_buffer })
 end
 
---- Store the original buffer content and name
+--- Store the original buffer name before modifying it
 ---@param self BlameSplitBuffer
 function M:store_original_buffer_state()
   if not self.file_buffer or not api.nvim_buf_is_valid(self.file_buffer) then
     return
   end
 
-  -- Only store if we haven't already stored the original state
-  if not self.original_buffer_content then
-    self.original_buffer_content = api.nvim_buf_get_lines(self.file_buffer, 0, -1, false)
+  -- Only store if we haven't already stored the original name
+  if not self.original_buffer_name then
     self.original_buffer_name = api.nvim_buf_get_name(self.file_buffer)
   end
 end
@@ -416,7 +412,7 @@ function M:update_file_buffer_content(commit)
     return
   end
 
-  -- Store original state if not already stored
+  -- Store original name if not already stored, so we can restore it on close
   self:store_original_buffer_state()
 
   -- Get file content at the specified commit
@@ -445,36 +441,6 @@ function M:update_file_buffer_content(commit)
   local git_dir = git.repo.git_dir
   local new_name = string.format("neogit://%s//%s:%s", git_dir, commit, self.file_path)
   api.nvim_buf_set_name(self.file_buffer, new_name)
-
-  -- Removed: self.current_commit = commit
-end
-
---- Restore the original buffer content and name
----@param self BlameSplitBuffer
-function M:restore_original_buffer_content()
-  if not self.file_buffer or not api.nvim_buf_is_valid(self.file_buffer) then
-    return
-  end
-
-  if not self.original_buffer_content or not self.original_buffer_name then
-    return
-  end
-
-  -- Restore original content
-  api.nvim_buf_set_option(self.file_buffer, "modifiable", true)
-  api.nvim_buf_set_lines(self.file_buffer, 0, -1, false, self.original_buffer_content)
-  -- Removed redundant: api.nvim_buf_set_option(self.file_buffer, "modifiable", true)
-  api.nvim_buf_set_option(self.file_buffer, "modified", false)
-  -- Note: Leaving modifiable as true, which is likely the desired state for the original user buffer.
-  -- If it needed to be restored to its exact original modifiable state, that would need to be stored too.
-
-  -- Restore original name
-  api.nvim_buf_set_name(self.file_buffer, self.original_buffer_name)
-
-  -- Clear stored state
-  self.original_buffer_content = nil
-  self.original_buffer_name = nil
-  -- Removed: self.current_commit = nil
 end
 
 --- Re-runs the blame for the given file at a specific commit without adding to history.
@@ -639,8 +605,17 @@ function M:setup_resize_handling()
 end
 
 function M:close()
-  -- Restore original buffer content before closing
-  self:restore_original_buffer_content()
+  local original_path = self.original_buffer_name
+
+  if original_path and self.file_buffer and api.nvim_buf_is_valid(self.file_buffer) then
+    local winid = fn.bufwinid(self.file_buffer)
+    if winid and winid > 0 and api.nvim_win_is_valid(winid) then
+
+      api.nvim_win_call(winid, function()
+        vim.cmd("edit! " .. fn.fnameescape(original_path))
+      end)
+    end
+  end
 
   if self.buffer then
     self.buffer:close()
