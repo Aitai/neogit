@@ -211,9 +211,29 @@ function M.new(file_path)
     file_path = file_path:sub(#git_root + 2)
   end
 
+  local blame_entries, err = blame.blame_file(file_path)
+
+  if not blame_entries then
+    local error_message = "Neogit: Git blame failed for " .. file_path
+    if err and err ~= "" then
+      error_message = error_message .. ".\n\nDetails:\n" .. err
+    end
+    vim.notify(error_message, vim.log.levels.ERROR, { title = "Blame Error" })
+    return nil
+  end
+
+  if #blame_entries == 0 then
+    vim.notify(
+      "Neogit: No blame information found for " .. file_path .. ". The file might be new or untracked.",
+      vim.log.levels.INFO,
+      { title = "Blame" }
+    )
+    return nil
+  end
+
   local instance = {
     file_path = file_path,
-    blame_entries = blame.blame_file(file_path),
+    blame_entries = blame_entries,
     commit_colors = {},
     next_color_index = 1,
     saved_width = 60,

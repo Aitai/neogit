@@ -61,7 +61,10 @@ api.nvim_create_user_command("NeogitBlameSplit", function(args)
   if BlameSplitBuffer.is_open() then
     BlameSplitBuffer.instance:close()
   else
-    BlameSplitBuffer.new(file_path):open()
+    local blame_instance = BlameSplitBuffer.new(file_path)
+    if blame_instance then
+      blame_instance:open()
+    end
   end
 end, {
   nargs = "?",
