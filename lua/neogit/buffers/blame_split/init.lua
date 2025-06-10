@@ -10,7 +10,7 @@ local fn = vim.fn
 ---@field file_path string
 ---@field blame_entries BlameEntry[]
 ---@field file_buffer number|nil
----@field commit_colors table<string, string>
+---@field commit_colors table<string, number>
 ---@field next_color_index number
 ---@field original_wrap boolean|nil
 ---@field saved_width number
@@ -18,6 +18,9 @@ local fn = vim.fn
 ---@field original_buffer_name string|nil
 ---@field history_stack table[] Stack of {commit: string, type: "reblame"|"parent", line: number}
 ---@field history_index number Current position in history stack (1-based)
+---@field highlight_ns number Namespace for dynamic hunk highlighting
+---@field last_highlighted_commit string|nil The commit SHA of the last highlighted hunk
+---@field history_buffer_names table<string, boolean>|nil Set of buffer names created for history views
 local M = {
   instance = nil,
 }
@@ -33,20 +36,45 @@ local COMMIT_COLORS = {
   "NeogitBlameCommit8",
 }
 
+local COMMIT_COLORS_BOLD = {
+  "NeogitBlameCommit1Bold",
+  "NeogitBlameCommit2Bold",
+  "NeogitBlameCommit3Bold",
+  "NeogitBlameCommit4Bold",
+  "NeogitBlameCommit5Bold",
+  "NeogitBlameCommit6Bold",
+  "NeogitBlameCommit7Bold",
+  "NeogitBlameCommit8Bold",
+}
+
 --
--- Private Helper Functions (were previously methods on M)
+-- Private Helper Functions
 --
+
+---@param self BlameSplitBuffer
+---@param commit string
+---@return number color_index
+local function _get_commit_color_index(self, commit)
+  if not self.commit_colors[commit] then
+    local color_index = ((self.next_color_index - 1) % #COMMIT_COLORS) + 1
+    self.commit_colors[commit] = color_index
+    self.next_color_index = self.next_color_index + 1
+  end
+  return self.commit_colors[commit]
+end
 
 ---@param self BlameSplitBuffer
 ---@param commit string
 ---@return string
 local function _get_commit_color(self, commit)
-  if not self.commit_colors[commit] then
-    local color_index = ((self.next_color_index - 1) % #COMMIT_COLORS) + 1
-    self.commit_colors[commit] = COMMIT_COLORS[color_index]
-    self.next_color_index = self.next_color_index + 1
-  end
-  return self.commit_colors[commit]
+  return COMMIT_COLORS[_get_commit_color_index(self, commit)]
+end
+
+---@param self BlameSplitBuffer
+---@param commit string
+---@return string
+local function _get_commit_color_bold(self, commit)
+  return COMMIT_COLORS_BOLD[_get_commit_color_index(self, commit)]
 end
 
 ---@param self BlameSplitBuffer
@@ -108,10 +136,10 @@ local function _render_info_line(hunk, commit_color, window_width)
   local date = git.blame.format_date(hunk.author_time)
   local author = hunk.author
   local date_width = fn.strdisplaywidth(date)
+  local message_highlight = "NeogitBlameMessage"
 
   local prefix_comps, prefix_len
   if hunk.line_count == 1 then
-    -- Single line: - commit author summary
     local summary = hunk.summary
     local prefix_str = string.format("- %s %s ", commit_short, author)
     local prefix_width = fn.strdisplaywidth(prefix_str)
@@ -125,8 +153,10 @@ local function _render_info_line(hunk, commit_color, window_width)
     prefix_comps = {
       text("- ", { highlight = commit_color }),
       text(commit_short, { highlight = commit_color }),
-      text(" " .. author .. " "),
-      text(summary, { highlight = "NeogitBlameMessage" }),
+      text(" "),
+      text(author),
+      text(" "),
+      text(summary, { highlight = message_highlight }),
     }
     prefix_len = prefix_width + summary_width
   else
@@ -137,14 +167,15 @@ local function _render_info_line(hunk, commit_color, window_width)
 
     if prefix_width > available_width then
       local overflow = prefix_width - available_width
-      author = vim.fn.strcharpart(author, 0, fn.strchars(author) - overflow)
+      author = vim.fn.strcharpart(author, 0, math.max(0, fn.strchars(author) - overflow))
       prefix_str = string.format("┍ %s %s", commit_short, author)
       prefix_width = fn.strdisplaywidth(prefix_str)
     end
     prefix_comps = {
       text("┍ ", { highlight = commit_color }),
       text(commit_short, { highlight = commit_color }),
-      text(" " .. author),
+      text(" "),
+      text(author),
     }
     prefix_len = prefix_width
   end
@@ -175,10 +206,12 @@ local function _render_summary_line(hunk, commit_color, window_width, is_last_li
     summary_width = fn.strdisplaywidth(summary)
   end
 
+  local message_highlight = "NeogitBlameMessage"
+
   local padding = window_width - symbol_width - summary_width
   return row {
     text(symbol, { highlight = commit_color }),
-    text(summary, { highlight = "NeogitBlameMessage" }),
+    text(summary, { highlight = message_highlight }),
     text(string.rep(" ", padding)),
   }
 end
@@ -198,14 +231,163 @@ local function _render_filler_line(symbol, commit_color, window_width)
 end
 
 --
--- History Management
+-- Highlighting Logic
 --
 
---- Add a new entry to the history stack
+---Updates the highlighting for the currently selected commit across the entire buffer.
+---This is called on CursorMoved and highlights all related hunks.
 ---@param self BlameSplitBuffer
----@param commit string
----@param operation_type string "reblame" or "parent"
----@param line number
+function M:update_hunk_highlight()
+  if not (self.buffer and self.buffer.handle and api.nvim_buf_is_valid(self.buffer.handle)) then
+    return
+  end
+  local blame_buf = self.buffer.handle
+  local current_line = api.nvim_win_get_cursor(0)[1]
+  local entry = self:get_blame_entry_for_line(current_line)
+
+  if not entry then
+    return
+  end
+
+  if self.last_highlighted_commit and self.last_highlighted_commit == entry.commit then
+    return
+  end
+
+  -- Clear all previous "bold" highlights from our namespace
+  api.nvim_buf_clear_namespace(blame_buf, self.highlight_ns, 0, -1)
+  self.last_highlighted_commit = entry.commit
+
+  local target_commit_sha = entry.commit
+  local bold_commit_color = _get_commit_color_bold(self, target_commit_sha)
+  local hunks = _get_hunks(self.blame_entries)
+  local line_nr_in_buffer = 1
+
+  for _, hunk in ipairs(hunks) do
+    if hunk.commit == target_commit_sha then
+      -- This whole hunk needs to be highlighted boldly.
+      for i = 1, hunk.line_count do
+        local current_line_idx = line_nr_in_buffer + i - 2 -- 0-indexed line in buffer
+
+        if i == 1 then
+          local line_content = api.nvim_buf_get_lines(
+            blame_buf,
+            current_line_idx,
+            current_line_idx + 1,
+            false
+          )[1] or ""
+          local commit_short = git.blame.abbreviate_commit(hunk.commit)
+          local date_str = git.blame.format_date(hunk.author_time)
+          local date_start_byte, _ = line_content:find(date_str, 1, true)
+
+          if hunk.line_count == 1 then
+            -- Single-line hunk: "- commit author summary"
+            local prefix_commit = "- " .. commit_short
+            local author_start_byte = #prefix_commit + 1 -- for the space
+
+            -- Highlight "- commit" part
+            api.nvim_buf_add_highlight(
+              blame_buf,
+              self.highlight_ns,
+              bold_commit_color,
+              current_line_idx,
+              0,
+              #prefix_commit
+            )
+            -- Highlight author part
+            api.nvim_buf_add_highlight(
+              blame_buf,
+              self.highlight_ns,
+              bold_commit_color,
+              current_line_idx,
+              author_start_byte,
+              author_start_byte + #hunk.author
+            )
+
+            -- Highlight summary part
+            if date_start_byte then
+              local summary_start_byte = author_start_byte + #hunk.author + 1 -- for the space
+              local summary_end_byte = date_start_byte - 2 -- account for padding
+              if summary_end_byte >= summary_start_byte then
+                api.nvim_buf_add_highlight(
+                  blame_buf,
+                  self.highlight_ns,
+                  "NeogitBlameMessageBold",
+                  current_line_idx,
+                  summary_start_byte,
+                  summary_end_byte
+                )
+              end
+            end
+          else
+            -- Multi-line hunk first line: "┍ commit author"
+            local prefix_commit = "┍ " .. commit_short
+            local author_start_byte = #prefix_commit + 1 -- for the space
+
+            -- Highlight "┍ commit" part
+            api.nvim_buf_add_highlight(
+              blame_buf,
+              self.highlight_ns,
+              bold_commit_color,
+              current_line_idx,
+              0,
+              #prefix_commit
+            )
+            -- Highlight author part (find end by looking for date)
+            if date_start_byte then
+              local author_end_byte = date_start_byte - 2 -- account for padding
+              if author_end_byte >= author_start_byte then
+                api.nvim_buf_add_highlight(
+                  blame_buf,
+                  self.highlight_ns,
+                  bold_commit_color,
+                  current_line_idx,
+                  author_start_byte,
+                  author_end_byte
+                )
+              end
+            end
+          end
+        else
+          local is_last_line = (i == hunk.line_count)
+          if i == 2 then -- Summary line
+            local symbol = is_last_line and "┕ " or "│ "
+            api.nvim_buf_add_highlight(
+              blame_buf,
+              self.highlight_ns,
+              bold_commit_color,
+              current_line_idx,
+              0,
+              #symbol
+            )
+            api.nvim_buf_add_highlight(
+              blame_buf,
+              self.highlight_ns,
+              "NeogitBlameMessageBold",
+              current_line_idx,
+              #symbol,
+              -1
+            )
+          else -- Filler line (i > 2)
+            local symbol = is_last_line and "┕" or "│"
+            api.nvim_buf_add_highlight(
+              blame_buf,
+              self.highlight_ns,
+              bold_commit_color,
+              current_line_idx,
+              0,
+              #symbol
+            )
+          end
+        end
+      end
+    end
+    line_nr_in_buffer = line_nr_in_buffer + hunk.line_count
+  end
+end
+
+--
+-- History Management
+--
 function M:push_history(commit, operation_type, line)
   -- Check if we're trying to add the same commit as the current one
   if self.history_index > 0 and self.history_index <= #self.history_stack then
@@ -338,11 +520,15 @@ function M.new(file_path)
     saved_width = 60,
     history_stack = {}, -- Will be initialized in open() with correct cursor position
     history_index = 0,
+    highlight_ns = api.nvim_create_namespace("neogit_blame_hunk"), 
+    last_highlighted_commit = nil,
+    history_buffer_names = {},
   }
   setmetatable(instance, { __index = M })
   return instance
 end
 
+--- This function renders only the static content.
 function M:render_blame_lines()
   local components = {}
   local window_width = _get_current_width(self)
@@ -437,62 +623,10 @@ function M:update_file_buffer_content(commit)
   api.nvim_buf_set_option(self.file_buffer, "modified", false)
 
   -- Update buffer name to indicate the commit being viewed
-  local git_root = git.repo.worktree_root
   local git_dir = git.repo.git_dir
   local new_name = string.format("neogit://%s//%s:%s", git_dir, commit, self.file_path)
+  self.history_buffer_names[new_name] = true
   api.nvim_buf_set_name(self.file_buffer, new_name)
-end
-
---- Re-runs the blame for the given file at a specific commit without adding to history.
----@param self BlameSplitBuffer
----@param commit string The commit SHA or revision string (e.g., "HEAD^") to blame at.
----@param original_line number The line number to try to restore the cursor to.
-function M:reblame_without_history(commit, original_line)
-  if not commit then
-    return
-  end
-
-  local new_blame_entries, err = git.blame.blame_file(self.file_path, commit)
-
-  if not new_blame_entries or #new_blame_entries == 0 then
-    local short_commit_str = git.blame.abbreviate_commit(commit)
-    local error_message = "Neogit: Re-blame failed for " .. self.file_path .. " at " .. short_commit_str
-    if err and err ~= "" then
-      error_message = error_message .. ".\n\nDetails:\n" .. err
-    else
-      error_message = error_message
-        .. ". The commit might not exist or the file may not exist at that commit."
-    end
-    vim.notify(error_message, vim.log.levels.ERROR, { title = "Blame Error" })
-    return
-  end
-
-  -- Update the file buffer with content from the commit
-  self:update_file_buffer_content(commit)
-
-  -- Update state
-  self.blame_entries = new_blame_entries
-  self.commit_colors = {}
-  self.next_color_index = 1
-
-  -- Rerender
-  self.buffer.ui:render(unpack(self:render_blame_lines()))
-
-  -- Clear any previous status messages on successful operation
-  vim.cmd("echon ''")
-
-  -- Restore cursor position
-  vim.defer_fn(function()
-    if self.buffer and api.nvim_buf_is_valid(self.buffer.handle) then
-      local line_count = api.nvim_buf_line_count(self.buffer.handle)
-      local target_line = math.min(original_line, line_count)
-      pcall(api.nvim_win_set_cursor, 0, { math.max(1, target_line), 0 })
-      -- Center the view on the new cursor position
-      api.nvim_win_call(0, function()
-        vim.cmd("normal! zz")
-      end)
-    end
-  end, 10)
 end
 
 --- Re-runs the blame for the given file at a specific commit and adds to history.
@@ -503,17 +637,72 @@ function M:reblame(commit, original_line)
   if not commit then
     return
   end
-
-  -- Update the current history entry's line position before adding new entry
   if self.history_index > 0 and self.history_index <= #self.history_stack then
     self.history_stack[self.history_index].line = original_line
   end
-
-  -- Add to history
   self:push_history(commit, "reblame", original_line)
-
-  -- Perform the actual reblame
   self:reblame_without_history(commit, original_line)
+end
+
+function M:reblame_without_history(commit, original_line)
+  if not commit then
+    return
+  end
+
+  local new_blame_entries, err = git.blame.blame_file(self.file_path, commit)
+
+  if not new_blame_entries then
+    local error_message = "Neogit: Git blame failed for "
+      .. self.file_path
+      .. " at commit "
+      .. git.blame.abbreviate_commit(commit)
+    if err and err ~= "" then
+      error_message = error_message .. ".\n\nDetails:\n" .. err
+    end
+    vim.notify(error_message, vim.log.levels.WARN, { title = "Blame" })
+    return
+  end
+
+  if #new_blame_entries == 0 then
+    vim.notify(
+      "Neogit: No blame information found for "
+        .. self.file_path
+        .. " at commit "
+        .. git.blame.abbreviate_commit(commit),
+      vim.log.levels.INFO,
+      { title = "Blame" }
+    )
+    return
+  end
+
+  self:update_file_buffer_content(commit)
+
+  -- Update state
+  self.blame_entries = new_blame_entries
+  self.commit_colors = {}
+  self.next_color_index = 1
+  self.last_highlighted_commit = nil
+
+  self.buffer.ui:render(unpack(self:render_blame_lines()))
+
+  -- Clear any previous status messages on successful operation
+  vim.cmd("echon ''")
+
+  -- Restore cursor position and update highlights
+  vim.defer_fn(function()
+    if self.buffer and api.nvim_buf_is_valid(self.buffer.handle) then
+      local line_count = api.nvim_buf_line_count(self.buffer.handle)
+      local target_line = math.min(original_line, line_count)
+      local win_handle = self.buffer.win_handle
+      if win_handle and api.nvim_win_is_valid(win_handle) then
+        pcall(api.nvim_win_set_cursor, win_handle, { math.max(1, target_line), 0 })
+        api.nvim_win_call(win_handle, function()
+          vim.cmd("normal! zz")
+          self:update_hunk_highlight() -- Initial highlight after re-blame
+        end)
+      end
+    end
+  end, 10)
 end
 
 function M:setup_scroll_sync()
@@ -533,9 +722,8 @@ function M:setup_scroll_sync()
     local source_line = api.nvim_win_get_cursor(0)[1]
     local target_win_id = fn.bufwinid(target_buf)
     if target_win_id > 0 and api.nvim_win_is_valid(target_win_id) then
-      api.nvim_win_call(target_win_id, function()
-        pcall(api.nvim_win_set_cursor, 0, { source_line, 0 })
-      end)
+      -- Use a pcall as the window might be hidden/invalid
+      pcall(api.nvim_win_set_cursor, target_win_id, { source_line, 0 })
     end
     syncing = false
   end
@@ -544,6 +732,7 @@ function M:setup_scroll_sync()
     buffer = blame_buf,
     callback = function()
       sync_cursor(file_buf)
+      self:update_hunk_highlight()
     end,
     group = self.buffer.autocmd_group,
   })
@@ -556,22 +745,19 @@ function M:setup_scroll_sync()
     group = self.buffer.autocmd_group,
   })
 
+  -- WinScrolled remains the same, it's the correct way to sync scrolling.
   api.nvim_create_autocmd("WinScrolled", {
     callback = function(args)
       if syncing then
         return
       end
-
-      local scrolled_win = tonumber(args.match) -- args.match is the window-ID for WinScrolled
+      local scrolled_win = tonumber(args.match)
       if not (scrolled_win and api.nvim_win_is_valid(scrolled_win)) then
         return
       end
-
       syncing = true
-
       local scrolled_buf = api.nvim_win_get_buf(scrolled_win)
       local target_buf = (scrolled_buf == blame_buf) and file_buf or (scrolled_buf == file_buf) and blame_buf
-
       if target_buf then
         local target_win_id = fn.bufwinid(target_buf)
         if target_win_id > 0 and api.nvim_win_is_valid(target_win_id) then
@@ -581,7 +767,6 @@ function M:setup_scroll_sync()
           end)
         end
       end
-
       syncing = false
     end,
     group = self.buffer.autocmd_group,
@@ -596,7 +781,10 @@ function M:setup_resize_handling()
         local current_width = _get_current_width(self)
         if current_width ~= self.saved_width then
           self.saved_width = current_width
+          -- A resize requires a full re-render
           self.buffer.ui:render(unpack(self:render_blame_lines()))
+          -- Re-apply highlights after render
+          self:update_hunk_highlight()
         end
       end
     end,
@@ -605,24 +793,41 @@ function M:setup_resize_handling()
 end
 
 function M:close()
+  -- Restore the original file buffer FIRST. This reclaims the buffer, renaming
+  -- it back to its original path.
   local original_path = self.original_buffer_name
-
   if original_path and self.file_buffer and api.nvim_buf_is_valid(self.file_buffer) then
     local winid = fn.bufwinid(self.file_buffer)
     if winid and winid > 0 and api.nvim_win_is_valid(winid) then
-
       api.nvim_win_call(winid, function()
         vim.cmd("edit! " .. fn.fnameescape(original_path))
       end)
     end
   end
 
+  -- Clean up all temporary buffers created for blame history.
+  if self.history_buffer_names then
+    for name, _ in pairs(self.history_buffer_names) do
+      local bufnr = fn.bufnr(name)
+      if bufnr > 0 then
+        -- Force-delete the buffer. Use pcall for safety in case it's in use.
+        pcall(api.nvim_buf_delete, bufnr, { force = true })
+      end
+    end
+  end
+
+  -- Close the main blame split buffer.
   if self.buffer then
     self.buffer:close()
   end
+
+  -- Restore settings on the original window.
   if self.original_wrap ~= nil then
+    -- It's possible the window was closed, so wrap this in a pcall.
     pcall(vim.api.nvim_set_option_value, "wrap", self.original_wrap, { scope = "local" })
   end
+
+  -- Finally, clear the singleton instance.
   M.instance = nil
 end
 
@@ -662,23 +867,18 @@ function M:open()
           if not entry then
             return
           end
-
           local blame_win = api.nvim_get_current_win()
           self.saved_width = api.nvim_win_get_width(blame_win)
           api.nvim_win_set_option(blame_win, "winfixwidth", true)
-
           local CommitViewBuffer = require("neogit.buffers.commit_view")
           local commit_view = CommitViewBuffer.new(entry.commit)
-
           local original_close = commit_view.close
           commit_view.close = function(cv)
             if original_close then
               original_close(cv)
             end
-
             if api.nvim_win_is_valid(blame_win) then
               api.nvim_set_current_win(blame_win)
-
               vim.defer_fn(function()
                 if api.nvim_win_is_valid(blame_win) then
                   pcall(api.nvim_win_set_width, blame_win, self.saved_width)
@@ -687,10 +887,8 @@ function M:open()
               end, 10)
             end
           end
-
           commit_view:open()
         end,
-        -- Reblame operations (with history)
         r = function()
           if self:check_unsaved_changes() then
             vim.notify(
@@ -707,11 +905,9 @@ function M:open()
           end
           self:reblame(entry.commit, line_nr)
         end,
-        -- Go back in history (alternative key)
         R = function()
           self:go_back()
         end,
-        -- Parent operations (with history)
         p = function()
           if self:check_unsaved_changes() then
             vim.notify(
@@ -724,18 +920,15 @@ function M:open()
           local line_nr = api.nvim_win_get_cursor(0)[1]
           self:goto_parent(line_nr, true)
         end,
-        -- Go back in history (alternative key)
         P = function()
           self:go_back()
         end,
-        -- History navigation
         ["<C-o>"] = function()
           self:go_back()
         end,
         ["<C-i>"] = function()
           self:go_forward()
         end,
-        -- Alternative history navigation
         ["["] = function()
           self:go_back()
         end,
@@ -755,13 +948,12 @@ function M:open()
       self:setup_scroll_sync()
       self:setup_resize_handling()
 
-      -- Initialize history stack with correct cursor position
       if #self.history_stack == 0 then
         self.history_stack = { { commit = "HEAD", type = "initial", line = self.initial_cursor_line } }
         self.history_index = 1
       end
 
-      -- Restore cursor position
+      -- Restore cursor position and trigger initial highlight
       vim.defer_fn(function()
         if api.nvim_win_is_valid(buffer.win_handle) then
           local line_count = api.nvim_buf_line_count(buffer.handle)
@@ -769,6 +961,7 @@ function M:open()
           pcall(api.nvim_win_set_cursor, buffer.win_handle, { math.max(1, target_line), 0 })
           api.nvim_win_call(buffer.win_handle, function()
             vim.cmd("normal! zz")
+            self:update_hunk_highlight()
           end)
         end
       end, 10)
@@ -777,3 +970,4 @@ function M:open()
 end
 
 return M
+
