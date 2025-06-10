@@ -398,10 +398,6 @@ function M:store_original_buffer_state()
     return
   end
 
-  -- Only store if we haven't already stored the original state
-  if not self.original_buffer_content then
-    self.original_buffer_content = api.nvim_buf_get_lines(self.file_buffer, 0, -1, false)
-
   -- Only store if we haven't already stored the original name
   if not self.original_buffer_name then
     self.original_buffer_name = api.nvim_buf_get_name(self.file_buffer)
