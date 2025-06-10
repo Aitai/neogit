@@ -20,6 +20,7 @@ local fn = vim.fn
 -- Removed: ---@field current_commit string|nil
 ---@field history_stack table[] Stack of {commit: string, type: "reblame"|"parent", line: number}
 ---@field history_index number Current position in history stack (1-based)
+---@field has_unsaved_changes boolean
 local M = {
   instance = nil,
 }
@@ -382,6 +383,17 @@ function M:get_blame_entry_for_line(line_nr)
   return nil
 end
 
+--- Check if the file buffer has unsaved changes
+---@param self BlameSplitBuffer
+---@return boolean
+function M:check_unsaved_changes()
+  if not self.file_buffer or not api.nvim_buf_is_valid(self.file_buffer) then
+    return false
+  end
+  
+  return api.nvim_get_option_value("modified", { buf = self.file_buffer })
+end
+
 --- Store the original buffer content and name
 ---@param self BlameSplitBuffer
 function M:store_original_buffer_state()
@@ -705,6 +717,14 @@ function M:open()
         end,
         -- Reblame operations (with history)
         r = function()
+          if self:check_unsaved_changes() then
+            vim.notify(
+              "Cannot reblame: buffer has unsaved changes. Save or discard changes first.",
+              vim.log.levels.WARN,
+              { title = "Blame" }
+            )
+            return
+          end
           local line_nr = api.nvim_win_get_cursor(0)[1]
           local entry = self:get_blame_entry_for_line(line_nr)
           if not entry then
@@ -718,6 +738,14 @@ function M:open()
         end,
         -- Parent operations (with history)
         p = function()
+          if self:check_unsaved_changes() then
+            vim.notify(
+              "Cannot navigate to parent: buffer has unsaved changes. Save or discard changes first.",
+              vim.log.levels.WARN,
+              { title = "Blame" }
+            )
+            return
+          end
           local line_nr = api.nvim_win_get_cursor(0)[1]
           self:goto_parent(line_nr, true)
         end,
