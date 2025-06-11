@@ -151,36 +151,60 @@ function M.parse_blame_porcelain(output)
   return entries
 end
 
----Get blame information for a file
+---Get blame information for a file on disk.
 ---@param file string Path to file
----@param commit string|nil Commit to blame from (defaults to working tree with uncommitted changes)
----@return BlameEntry[]
+---@param commit string|nil Commit to blame from (defaults to working tree)
+---@return BlameEntry[]|nil, string|nil err
 function M.blame_file(file, commit)
   local ok, result = pcall(function()
+    local cmd = git.cli.blame.porcelain
     if commit then
-      -- Blame against a specific commit
-      return git.cli.blame.porcelain.args(commit).files(file).call { hidden = true }
-    else
-      -- Blame against working tree (includes uncommitted changes)
-      return git.cli.blame.porcelain.files(file).call { hidden = true }
+      cmd = cmd.args(commit)
     end
+    return cmd.files(file).call { hidden = true, trim = false }
   end)
 
   if not ok then
-    print("Error calling git blame:", result)
-    return {}
+    return nil, "Error calling git blame: " .. tostring(result)
   end
 
   if result.code ~= 0 then
-    print("Git blame failed with code:", result.code)
-    if result.stderr and #result.stderr > 0 then
-      print("Stderr:", table.concat(result.stderr, " "))
+    local err_msg = "Git blame failed"
+    if result.stderr and #result.stderr > 0 and result.stderr[1] ~= "" then
+      err_msg = err_msg .. ":\n" .. table.concat(result.stderr, "\n")
     end
-    return {}
+    return nil, err_msg
   end
 
-  local entries = M.parse_blame_porcelain(result.stdout)
-  return entries
+  return M.parse_blame_porcelain(result.stdout)
+end
+
+---Get blame information for a buffer's content.
+---@param file string Path to file (for history lookup)
+---@param content string[] Buffer content
+---@return BlameEntry[]|nil, string|nil err
+function M.blame_buffer(file, content)
+  local ok, result = pcall(function()
+    return git.cli.blame.porcelain
+      .args("--contents", "-")
+      .files(file)
+      .input(table.concat(content, "\n") .. "\n") -- Git often needs a trailing newline
+      .call { hidden = true, trim = false }
+  end)
+
+  if not ok then
+    return nil, "Error calling git blame with buffer contents: " .. tostring(result)
+  end
+
+  if result.code ~= 0 then
+    local err_msg = "Git blame with buffer contents failed"
+    if result.stderr and #result.stderr > 0 and result.stderr[1] ~= "" then
+      err_msg = err_msg .. ":\n" .. table.concat(result.stderr, "\n")
+    end
+    return nil, err_msg
+  end
+
+  return M.parse_blame_porcelain(result.stdout)
 end
 
 ---Format a timestamp as a date string
@@ -194,6 +218,9 @@ end
 ---@param commit string Full commit hash
 ---@return string Abbreviated hash (8 characters)
 function M.abbreviate_commit(commit)
+  if commit:match("^0+$") then
+    return "Uncommitted"
+  end
   return commit:sub(1, 8)
 end
 

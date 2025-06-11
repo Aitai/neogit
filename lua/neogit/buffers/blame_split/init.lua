@@ -9,7 +9,8 @@ local fn = vim.fn
 ---@field buffer Buffer
 ---@field file_path string
 ---@field blame_entries BlameEntry[]
----@field file_buffer number|nil
+---@field original_file_buffer number The buffer the user was editing, potentially with unsaved changes.
+---@field view_file_buffer number The buffer used to display file content, might be the original or a temp buffer.
 ---@field commit_colors table<string, number>
 ---@field next_color_index number
 ---@field original_wrap boolean|nil
@@ -21,6 +22,9 @@ local fn = vim.fn
 ---@field highlight_ns number Namespace for dynamic hunk highlighting
 ---@field last_highlighted_commit string|nil The commit SHA of the last highlighted hunk
 ---@field history_buffer_names table<string, boolean>|nil Set of buffer names created for history views
+---@field was_originally_modified boolean Whether the original buffer had unsaved changes.
+---@field view_win_id number|nil The window ID for the file content view.
+---@field temp_history_buffer number|nil A reusable buffer for showing historical file content.
 local M = {
   instance = nil,
 }
@@ -543,7 +547,15 @@ function M.new(file_path)
     file_path = file_path:sub(#git_root + 2)
   end
 
-  local blame_entries, err = git.blame.blame_file(file_path)
+  local blame_entries, err
+  local current_buf = fn.bufnr("%")
+
+  if api.nvim_buf_is_valid(current_buf) and api.nvim_get_option_value("modified", { buf = current_buf }) then
+    local content = api.nvim_buf_get_lines(current_buf, 0, -1, false)
+    blame_entries, err = git.blame.blame_buffer(file_path, content)
+  else
+    blame_entries, err = git.blame.blame_file(file_path)
+  end
 
   if not blame_entries then
     local error_message = "Neogit: Git blame failed for " .. file_path
@@ -617,87 +629,72 @@ function M:get_blame_entry_for_line(line_nr)
   return nil
 end
 
---- Check if the file buffer has unsaved changes
----@param self BlameSplitBuffer
----@return boolean
-function M:check_unsaved_changes()
-  if not self.file_buffer or not api.nvim_buf_is_valid(self.file_buffer) then
-    return false
-  end
-
-  return api.nvim_get_option_value("modified", { buf = self.file_buffer })
-end
-
---- Store the original buffer name before modifying it
----@param self BlameSplitBuffer
-function M:store_original_buffer_state()
-  if not self.file_buffer or not api.nvim_buf_is_valid(self.file_buffer) then
-    return
-  end
-
-  -- Only store if we haven't already stored the original name
-  if not self.original_buffer_name then
-    self.original_buffer_name = api.nvim_buf_get_name(self.file_buffer)
-  end
-end
-
---- Update the file buffer with content from a specific commit
+--- Update the file buffer with content from a specific commit.
+--- This function is now non-destructive to the original user buffer.
 ---@param self BlameSplitBuffer
 ---@param commit string|nil The commit to show content from (nil for working tree)
 function M:update_file_buffer_content(commit)
-  if not self.file_buffer or not api.nvim_buf_is_valid(self.file_buffer) then
+  local file_win = self.view_win_id
+  if not (file_win and api.nvim_win_is_valid(file_win)) then
     return
   end
 
-  -- Store original name if not already stored, so we can restore it on close
-  self:store_original_buffer_state()
-
-  local content
-  local new_name
-  local err
-
+  -- If not a specific commit, we are viewing the working tree.
+  -- Restore the original buffer to the window.
   if not commit then
-    -- Working tree view: Read content from the original file on disk.
-    local original_path = self.original_buffer_name
-    if not original_path then return end
-
-    local ok
-    ok, content = pcall(vim.fn.readfile, original_path)
-    if not ok then
-      vim.notify("Failed to read original file: " .. original_path, vim.log.levels.ERROR, { title = "Blame" })
-      return
+    if self.view_file_buffer ~= self.original_file_buffer then
+      api.nvim_win_set_buf(file_win, self.original_file_buffer)
+      self.view_file_buffer = self.original_file_buffer
     end
-    new_name = original_path
-  else
-    -- Historical commit view: Get file content at the specified commit.
-    local ok, result = pcall(function()
-      return git.cli.show.file(self.file_path, commit).call { hidden = true, trim = false }
-    end)
-
-    if not ok or result.code ~= 0 then
-      err = result and result.stderr or "pcall failed"
-      local msg = "Failed to get file content at commit " .. git.blame.abbreviate_commit(commit) .. "\n\n" .. err
-      vim.notify(msg, vim.log.levels.WARN, { title = "Blame" })
-      return
-    end
-    content = result.stdout
-    local git_dir = git.repo.git_dir
-    new_name = string.format("neogit://%s//%s:%s", git_dir, commit, self.file_path)
+    -- The original buffer is now back in view, with its content and modified status intact.
+    -- No further action needed for its content.
+    return
   end
 
-  -- Atomically update the buffer's content and name, ensuring it's the same buffer.
-  api.nvim_buf_set_option(self.file_buffer, "modifiable", true)
-  api.nvim_buf_set_lines(self.file_buffer, 0, -1, false, content)
-  api.nvim_buf_set_option(self.file_buffer, "modifiable", false)
-  api.nvim_buf_set_option(self.file_buffer, "modified", false)
+  -- For a specific commit, we need to show historical content.
+  -- We use a single temporary buffer to avoid creating many buffers.
+  if not self.temp_history_buffer or not api.nvim_buf_is_valid(self.temp_history_buffer) then
+    self.temp_history_buffer = api.nvim_create_buf(false, true) -- not listed, scratch
+    api.nvim_buf_set_option(self.temp_history_buffer, "bufhidden", "wipe")
+  end
 
-  local current_name = api.nvim_buf_get_name(self.file_buffer)
+  -- Make sure the temporary buffer is being shown.
+  if self.view_file_buffer ~= self.temp_history_buffer then
+    api.nvim_win_set_buf(file_win, self.temp_history_buffer)
+    self.view_file_buffer = self.temp_history_buffer
+  end
+
+  local content, err
+  local ok, result = pcall(function()
+    return git.cli.show.file(self.file_path, commit).call { hidden = true, trim = false }
+  end)
+
+  if not ok or result.code ~= 0 then
+    err = result and result.stderr or "pcall failed"
+    local msg = "Failed to get file content at commit " .. git.blame.abbreviate_commit(commit) .. "\n\n" .. err
+    vim.notify(msg, vim.log.levels.WARN, { title = "Blame" })
+    -- Put some error message in the buffer to indicate failure
+    content = { "Error: Could not load file content for this commit." }
+  else
+    content = result.stdout
+  end
+
+  local git_dir = git.repo.git_dir
+  local new_name = string.format("neogit://%s//%s:%s", git_dir, commit, self.file_path)
+
+  -- Atomically update the temporary buffer's content.
+  api.nvim_buf_set_option(self.view_file_buffer, "modifiable", true)
+  api.nvim_buf_set_lines(self.view_file_buffer, 0, -1, false, content)
+  api.nvim_buf_set_option(self.view_file_buffer, "modifiable", false)
+  api.nvim_buf_set_option(self.view_file_buffer, "modified", false)
+
+  -- Set filetype for syntax highlighting
+  local original_ft = api.nvim_get_option_value("filetype", { buf = self.original_file_buffer })
+  api.nvim_buf_set_option(self.view_file_buffer, "filetype", original_ft)
+
+  local current_name = api.nvim_buf_get_name(self.view_file_buffer)
   if current_name ~= new_name then
-    -- If we are creating a new historical view, track its name for cleanup.
-    if commit then
-      self.history_buffer_names[new_name] = true
-    end
-    pcall(api.nvim_buf_set_name, self.file_buffer, new_name)
+    pcall(api.nvim_buf_set_name, self.view_file_buffer, new_name)
   end
 end
 
@@ -725,8 +722,13 @@ function M:reblame_without_history(commit, original_line)
     -- Blame against a specific commit
     new_blame_entries, err = git.blame.blame_file(self.file_path, commit)
   else
-    -- Blame against working tree (nil commit means current working tree)
-    new_blame_entries, err = git.blame.blame_file(self.file_path)
+    -- Blame against working tree (check for unsaved changes)
+    if self.was_originally_modified then
+      local content = api.nvim_buf_get_lines(self.original_file_buffer, 0, -1, false)
+      new_blame_entries, err = git.blame.blame_buffer(self.file_path, content)
+    else
+      new_blame_entries, err = git.blame.blame_file(self.file_path)
+    end
   end
 
   if not new_blame_entries then
@@ -786,23 +788,17 @@ function M:reblame_without_history(commit, original_line)
 end
 
 function M:setup_scroll_sync()
-  if not self.file_buffer or not api.nvim_buf_is_valid(self.file_buffer) then
-    return
-  end
-
   local blame_buf = self.buffer.handle
-  local file_buf = self.file_buffer
   local syncing = false
 
-  local function sync_cursor(target_buf)
-    if syncing then
+  local function sync_cursor(source_bufnr, target_win_id)
+    if syncing or not api.nvim_win_is_valid(target_win_id) then
       return
     end
     syncing = true
-    local source_line = api.nvim_win_get_cursor(0)[1]
-    local target_win_id = fn.bufwinid(target_buf)
-    if target_win_id > 0 and api.nvim_win_is_valid(target_win_id) then
-      -- Use a pcall as the window might be hidden/invalid
+    local source_win_id = fn.bufwinid(source_bufnr)
+    if source_win_id > 0 then
+      local source_line = api.nvim_win_get_cursor(source_win_id)[1]
       pcall(api.nvim_win_set_cursor, target_win_id, { source_line, 0 })
     end
     syncing = false
@@ -811,21 +807,27 @@ function M:setup_scroll_sync()
   api.nvim_create_autocmd("CursorMoved", {
     buffer = blame_buf,
     callback = function()
-      sync_cursor(file_buf)
-      self:update_hunk_highlight()
+      if self.view_win_id then
+        sync_cursor(blame_buf, self.view_win_id)
+        self:update_hunk_highlight()
+      end
     end,
     group = self.buffer.autocmd_group,
   })
 
   api.nvim_create_autocmd("CursorMoved", {
-    buffer = file_buf,
-    callback = function()
-      sync_cursor(blame_buf)
+    pattern = "*", -- Needs to be generic as file buffer can change
+    callback = function(args)
+      if args.buf == self.view_file_buffer then
+        local blame_win_id = fn.bufwinid(blame_buf)
+        if blame_win_id > 0 then
+          sync_cursor(args.buf, blame_win_id)
+        end
+      end
     end,
     group = self.buffer.autocmd_group,
   })
 
-  -- WinScrolled remains the same, it's the correct way to sync scrolling.
   api.nvim_create_autocmd("WinScrolled", {
     callback = function(args)
       if syncing then
@@ -835,17 +837,22 @@ function M:setup_scroll_sync()
       if not (scrolled_win and api.nvim_win_is_valid(scrolled_win)) then
         return
       end
+
       syncing = true
       local scrolled_buf = api.nvim_win_get_buf(scrolled_win)
-      local target_buf = (scrolled_buf == blame_buf) and file_buf or (scrolled_buf == file_buf) and blame_buf
-      if target_buf then
-        local target_win_id = fn.bufwinid(target_buf)
-        if target_win_id > 0 and api.nvim_win_is_valid(target_win_id) then
-          local view = api.nvim_win_call(scrolled_win, fn.winsaveview)
-          api.nvim_win_call(target_win_id, function()
-            fn.winrestview(view)
-          end)
-        end
+      local target_win_id
+
+      if scrolled_buf == blame_buf then
+        target_win_id = self.view_win_id
+      elseif scrolled_buf == self.view_file_buffer then
+        target_win_id = fn.bufwinid(blame_buf)
+      end
+
+      if target_win_id and api.nvim_win_is_valid(target_win_id) then
+        local view = api.nvim_win_call(scrolled_win, fn.winsaveview)
+        api.nvim_win_call(target_win_id, function()
+          fn.winrestview(view)
+        end)
       end
       syncing = false
     end,
@@ -873,33 +880,24 @@ function M:setup_resize_handling()
 end
 
 function M:close()
-  -- Restore the original file buffer FIRST. This reclaims the buffer, renaming
-  -- it back to its original path.
-  local original_path = self.original_buffer_name
-  if original_path and self.file_buffer and api.nvim_buf_is_valid(self.file_buffer) then
-    local winid = fn.bufwinid(self.file_buffer)
-    if winid and winid > 0 and api.nvim_win_is_valid(winid) then
-      api.nvim_win_call(winid, function()
-        vim.cmd("edit! " .. fn.fnameescape(original_path))
-        -- Restore cursor position to where the blame split was originally opened
-        if self.initial_cursor_line then
-          local line_count = api.nvim_buf_line_count(0)
-          local target_line = math.min(self.initial_cursor_line, line_count)
-          pcall(api.nvim_win_set_cursor, 0, { math.max(1, target_line), 0 })
-        end
-      end)
+  -- If we used a temporary buffer for history, restore the original buffer to the window.
+  if self.view_win_id and api.nvim_win_is_valid(self.view_win_id) then
+    if self.view_file_buffer ~= self.original_file_buffer then
+      api.nvim_win_set_buf(self.view_win_id, self.original_file_buffer)
     end
+    -- Restore cursor position in the original window
+    api.nvim_win_call(self.view_win_id, function()
+      if self.initial_cursor_line then
+        local line_count = api.nvim_buf_line_count(0)
+        local target_line = math.min(self.initial_cursor_line, line_count)
+        pcall(api.nvim_win_set_cursor, 0, { math.max(1, target_line), 0 })
+      end
+    end)
   end
 
-  -- Clean up all temporary buffers created for blame history.
-  if self.history_buffer_names then
-    for name, _ in pairs(self.history_buffer_names) do
-      local bufnr = fn.bufnr(name)
-      if bufnr > 0 then
-        -- Force-delete the buffer. Use pcall for safety in case it's in use.
-        pcall(api.nvim_buf_delete, bufnr, { force = true })
-      end
-    end
+  -- Clean up the temporary history buffer if it was created
+  if self.temp_history_buffer and api.nvim_buf_is_valid(self.temp_history_buffer) then
+    pcall(api.nvim_buf_delete, self.temp_history_buffer, { force = true })
   end
 
   -- Close the main blame split buffer.
@@ -908,9 +906,8 @@ function M:close()
   end
 
   -- Restore settings on the original window.
-  if self.original_wrap ~= nil then
-    -- It's possible the window was closed, so wrap this in a pcall.
-    pcall(vim.api.nvim_set_option_value, "wrap", self.original_wrap, { scope = "local" })
+  if self.original_wrap ~= nil and self.view_win_id and api.nvim_win_is_valid(self.view_win_id) then
+    pcall(api.nvim_win_set_option, self.view_win_id, "wrap", self.original_wrap)
   end
 
   -- Finally, clear the singleton instance.
@@ -924,10 +921,14 @@ end
 function M:open()
   M.instance = self
 
-  self.file_buffer = api.nvim_get_current_buf()
+  -- Setup initial state from the user's buffer
+  self.original_file_buffer = api.nvim_get_current_buf()
+  self.view_file_buffer = self.original_file_buffer
+  self.view_win_id = api.nvim_get_current_win()
   self.initial_cursor_line = api.nvim_win_get_cursor(0)[1]
-
+  self.was_originally_modified = api.nvim_get_option_value("modified", { buf = self.original_file_buffer })
   self.original_wrap = vim.wo.wrap
+
   vim.wo.wrap = false
 
   self.buffer = Buffer.create {
@@ -984,17 +985,13 @@ function M:open()
           commit_view:open()
         end,
         r = function()
-          if self:check_unsaved_changes() then
-            vim.notify(
-              "Cannot reblame: buffer has unsaved changes. Save or discard changes first.",
-              vim.log.levels.WARN,
-              { title = "Blame" }
-            )
-            return
-          end
           local line_nr = api.nvim_win_get_cursor(0)[1]
           local entry = self:get_blame_entry_for_line(line_nr)
           if not entry then
+            return
+          end
+          if entry.commit:match("^0+$") then
+            vim.notify("Cannot re-blame at an uncommitted change.", vim.log.levels.INFO, { title = "Blame" })
             return
           end
           self:reblame(entry.commit, line_nr)
@@ -1003,14 +1000,6 @@ function M:open()
           self:go_back()
         end,
         p = function()
-          if self:check_unsaved_changes() then
-            vim.notify(
-              "Cannot navigate to parent: buffer has unsaved changes. Save or discard changes first.",
-              vim.log.levels.WARN,
-              { title = "Blame" }
-            )
-            return
-          end
           local line_nr = api.nvim_win_get_cursor(0)[1]
           self:goto_parent(line_nr, true)
         end,
