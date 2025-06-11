@@ -817,6 +817,12 @@ function M:close()
     if winid and winid > 0 and api.nvim_win_is_valid(winid) then
       api.nvim_win_call(winid, function()
         vim.cmd("edit! " .. fn.fnameescape(original_path))
+        -- Restore cursor position to where the blame split was originally opened
+        if self.initial_cursor_line then
+          local line_count = api.nvim_buf_line_count(0)
+          local target_line = math.min(self.initial_cursor_line, line_count)
+          pcall(api.nvim_win_set_cursor, 0, { math.max(1, target_line), 0 })
+        end
       end)
     end
   end
