@@ -405,6 +405,11 @@ end
 -- History Management
 --
 function M:push_history(commit, operation_type, line)
+  -- Normalize commit: convert all-zero commits to nil (working tree)
+  if commit and commit:match("^0+$") then
+    commit = nil
+  end
+
   -- Check if we're trying to add the same commit as the current one
   if self.history_index > 0 and self.history_index <= #self.history_stack then
     local current_entry = self.history_stack[self.history_index]
@@ -452,9 +457,17 @@ function M:go_back()
     return false
   end
 
+  local old_index = self.history_index
   self.history_index = self.history_index - 1
   local entry = self.history_stack[self.history_index]
-  self:reblame_without_history(entry.commit, entry.line)
+  local success = self:reblame_without_history(entry.commit, entry.line)
+
+  if not success then
+    -- Restore the previous index if blame failed
+    self.history_index = old_index
+    return false
+  end
+
   return true
 end
 
@@ -467,9 +480,17 @@ function M:go_forward()
     return false
   end
 
+  local old_index = self.history_index
   self.history_index = self.history_index + 1
   local entry = self.history_stack[self.history_index]
-  self:reblame_without_history(entry.commit, entry.line)
+  local success = self:reblame_without_history(entry.commit, entry.line)
+
+  if not success then
+    -- Restore the previous index if blame failed
+    self.history_index = old_index
+    return false
+  end
+
   return true
 end
 
@@ -483,6 +504,16 @@ function M:goto_parent(line_nr, add_to_history)
     return
   end
 
+  -- Don't try to get parent of uncommitted changes
+  if entry.commit:match("^0+$") then
+    vim.notify(
+      "Cannot navigate to parent of uncommitted changes.",
+      vim.log.levels.INFO,
+      { title = "Blame" }
+    )
+    return
+  end
+
   local parent_commit = entry.commit .. "^"
 
   if add_to_history then
@@ -491,10 +522,14 @@ function M:goto_parent(line_nr, add_to_history)
       self.history_stack[self.history_index].line = line_nr
     end
 
-    self:push_history(parent_commit, "parent", line_nr)
+    -- Only add to history if the reblame succeeds
+    local success = self:reblame_without_history(parent_commit, line_nr)
+    if success then
+      self:push_history(parent_commit, "parent", line_nr)
+    end
+  else
+    self:reblame_without_history(parent_commit, line_nr)
   end
-
-  self:reblame_without_history(parent_commit, line_nr)
 end
 
 --
@@ -536,7 +571,7 @@ function M.new(file_path)
     saved_width = 60,
     history_stack = {}, -- Will be initialized in open() with correct cursor position
     history_index = 0,
-    highlight_ns = api.nvim_create_namespace("neogit_blame_hunk"), 
+    highlight_ns = api.nvim_create_namespace("neogit_blame_hunk"),
     last_highlighted_commit = nil,
     history_buffer_names = {},
   }
@@ -617,53 +652,65 @@ function M:update_file_buffer_content(commit)
   -- Store original name if not already stored, so we can restore it on close
   self:store_original_buffer_state()
 
+  local content
+  local new_name
+  local err
+
   if not commit then
-    -- For working tree (uncommitted changes), restore the original file
+    -- Working tree view: Read content from the original file on disk.
     local original_path = self.original_buffer_name
-    if original_path then
-      api.nvim_win_call(fn.bufwinid(self.file_buffer), function()
-        vim.cmd("edit! " .. fn.fnameescape(original_path))
-      end)
+    if not original_path then return end
+
+    local ok
+    ok, content = pcall(vim.fn.readfile, original_path)
+    if not ok then
+      vim.notify("Failed to read original file: " .. original_path, vim.log.levels.ERROR, { title = "Blame" })
+      return
     end
-    return
+    new_name = original_path
+  else
+    -- Historical commit view: Get file content at the specified commit.
+    local ok, result = pcall(function()
+      return git.cli.show.file(self.file_path, commit).call { hidden = true, trim = false }
+    end)
+
+    if not ok or result.code ~= 0 then
+      err = result and result.stderr or "pcall failed"
+      local msg = "Failed to get file content at commit " .. git.blame.abbreviate_commit(commit) .. "\n\n" .. err
+      vim.notify(msg, vim.log.levels.WARN, { title = "Blame" })
+      return
+    end
+    content = result.stdout
+    local git_dir = git.repo.git_dir
+    new_name = string.format("neogit://%s//%s:%s", git_dir, commit, self.file_path)
   end
 
-  -- Get file content at the specified commit
-  local ok, result = pcall(function()
-    return git.cli.show.file(self.file_path, commit).call { hidden = true, trim = false }
-  end)
-
-  if not ok or result.code ~= 0 then
-    vim.notify(
-      "Failed to get file content at commit " .. git.blame.abbreviate_commit(commit),
-      vim.log.levels.WARN,
-      { title = "Blame" }
-    )
-    return
-  end
-
-  -- Update buffer content
-  local content = result.stdout
+  -- Atomically update the buffer's content and name, ensuring it's the same buffer.
   api.nvim_buf_set_option(self.file_buffer, "modifiable", true)
   api.nvim_buf_set_lines(self.file_buffer, 0, -1, false, content)
   api.nvim_buf_set_option(self.file_buffer, "modifiable", false)
   api.nvim_buf_set_option(self.file_buffer, "modified", false)
 
-  -- Update buffer name to indicate the commit being viewed
-  local git_dir = git.repo.git_dir
-  local new_name = string.format("neogit://%s//%s:%s", git_dir, commit, self.file_path)
-  self.history_buffer_names[new_name] = true
-  api.nvim_buf_set_name(self.file_buffer, new_name)
+  local current_name = api.nvim_buf_get_name(self.file_buffer)
+  if current_name ~= new_name then
+    -- If we are creating a new historical view, track its name for cleanup.
+    if commit then
+      self.history_buffer_names[new_name] = true
+    end
+    pcall(api.nvim_buf_set_name, self.file_buffer, new_name)
+  end
 end
 
 --- Re-runs the blame for the given file at a specific commit and adds to history.
 ---@param self BlameSplitBuffer
----@param commit string The commit SHA or revision string (e.g., "HEAD^") to blame at.
+---@param commit string|nil The commit SHA or revision string (e.g., "HEAD^") to blame at.
 ---@param original_line number The line number to try to restore the cursor to.
 function M:reblame(commit, original_line)
-  if not commit then
-    return
+  -- Normalize commit: convert all-zero commits to nil (working tree)
+  if commit and commit:match("^0+$") then
+    commit = nil
   end
+
   if self.history_index > 0 and self.history_index <= #self.history_stack then
     self.history_stack[self.history_index].line = original_line
   end
@@ -672,39 +719,43 @@ function M:reblame(commit, original_line)
 end
 
 function M:reblame_without_history(commit, original_line)
-  if not commit then
-    return
+  local new_blame_entries, err
+
+  if commit then
+    -- Blame against a specific commit
+    new_blame_entries, err = git.blame.blame_file(self.file_path, commit)
+  else
+    -- Blame against working tree (nil commit means current working tree)
+    new_blame_entries, err = git.blame.blame_file(self.file_path)
   end
 
-  local new_blame_entries, err = git.blame.blame_file(self.file_path, commit)
-
   if not new_blame_entries then
-    local error_message = "Neogit: Git blame failed for "
-      .. self.file_path
-      .. " at commit "
-      .. git.blame.abbreviate_commit(commit)
+    local error_message = "Neogit: No blame information found for " .. self.file_path
+    if commit then
+      error_message = error_message .. " at commit " .. git.blame.abbreviate_commit(commit)
+    end
     if err and err ~= "" then
       error_message = error_message .. ".\n\nDetails:\n" .. err
     end
     vim.notify(error_message, vim.log.levels.WARN, { title = "Blame" })
-    return
+
+    -- Don't update the buffer state if blame failed - this prevents the navigation from breaking
+    return false
   end
 
   if #new_blame_entries == 0 then
-    vim.notify(
-      "Neogit: No blame information found for "
-        .. self.file_path
-        .. " at commit "
-        .. git.blame.abbreviate_commit(commit),
-      vim.log.levels.INFO,
-      { title = "Blame" }
-    )
-    return
+    local info_message = "Neogit: No blame information found for " .. self.file_path
+    if commit then
+      info_message = info_message .. " at commit " .. git.blame.abbreviate_commit(commit)
+    end
+    vim.notify(info_message, vim.log.levels.INFO, { title = "Blame" })
+    return false
   end
 
+  -- Only update file buffer content if blame was successful
   self:update_file_buffer_content(commit)
 
-  -- Update state
+  -- Update state only after successful blame
   self.blame_entries = new_blame_entries
   self.commit_colors = {}
   self.next_color_index = 1
@@ -730,6 +781,8 @@ function M:reblame_without_history(commit, original_line)
       end
     end
   end, 10)
+
+  return true
 end
 
 function M:setup_scroll_sync()
