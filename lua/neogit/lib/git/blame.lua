@@ -152,13 +152,17 @@ end
 
 ---Get blame information for a file
 ---@param file string Path to file
----@param commit string|nil Commit to blame from (defaults to HEAD)
+---@param commit string|nil Commit to blame from (defaults to working tree with uncommitted changes)
 ---@return BlameEntry[]
 function M.blame_file(file, commit)
-  commit = commit or "HEAD"
-
   local ok, result = pcall(function()
-    return git.cli.blame.porcelain.args(commit).files(file).call { hidden = true }
+    if commit then
+      -- Blame against a specific commit
+      return git.cli.blame.porcelain.args(commit).files(file).call { hidden = true }
+    else
+      -- Blame against working tree (includes uncommitted changes)
+      return git.cli.blame.porcelain.files(file).call { hidden = true }
+    end
   end)
 
   if not ok then

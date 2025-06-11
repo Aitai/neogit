@@ -608,7 +608,7 @@ end
 
 --- Update the file buffer with content from a specific commit
 ---@param self BlameSplitBuffer
----@param commit string The commit to show content from
+---@param commit string|nil The commit to show content from (nil for working tree)
 function M:update_file_buffer_content(commit)
   if not self.file_buffer or not api.nvim_buf_is_valid(self.file_buffer) then
     return
@@ -616,6 +616,17 @@ function M:update_file_buffer_content(commit)
 
   -- Store original name if not already stored, so we can restore it on close
   self:store_original_buffer_state()
+
+  if not commit then
+    -- For working tree (uncommitted changes), restore the original file
+    local original_path = self.original_buffer_name
+    if original_path then
+      api.nvim_win_call(fn.bufwinid(self.file_buffer), function()
+        vim.cmd("edit! " .. fn.fnameescape(original_path))
+      end)
+    end
+    return
+  end
 
   -- Get file content at the specified commit
   local ok, result = pcall(function()
@@ -889,6 +900,14 @@ function M:open()
           if not entry then
             return
           end
+          if entry.commit:match("^0+$") ~= nil then
+            vim.notify(
+              "Cannot show commit view for uncommitted changes.",
+              vim.log.levels.INFO,
+              { title = "Blame" }
+            )
+            return
+          end
           local blame_win = api.nvim_get_current_win()
           self.saved_width = api.nvim_win_get_width(blame_win)
           api.nvim_win_set_option(blame_win, "winfixwidth", true)
@@ -971,7 +990,7 @@ function M:open()
       self:setup_resize_handling()
 
       if #self.history_stack == 0 then
-        self.history_stack = { { commit = "HEAD", type = "initial", line = self.initial_cursor_line } }
+        self.history_stack = { { commit = nil, type = "initial", line = self.initial_cursor_line } }
         self.history_index = 1
       end
 
