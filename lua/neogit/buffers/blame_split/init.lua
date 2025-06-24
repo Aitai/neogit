@@ -683,19 +683,17 @@ function M:update_file_buffer_content(commit)
   local new_name = string.format("neogit://%s//%s:%s", git_dir, commit, self.file_path)
 
   -- Atomically update the temporary buffer's content.
+  api.nvim_buf_call(self.view_file_buffer, function()
   api.nvim_buf_set_option(self.view_file_buffer, "modifiable", true)
   api.nvim_buf_set_lines(self.view_file_buffer, 0, -1, false, content)
   api.nvim_buf_set_option(self.view_file_buffer, "modifiable", false)
   api.nvim_buf_set_option(self.view_file_buffer, "modified", false)
+  pcall(api.nvim_buf_set_name, self.view_file_buffer, new_name)
+end)
 
-  -- Set filetype for syntax highlighting
-  local original_ft = api.nvim_get_option_value("filetype", { buf = self.original_file_buffer })
-  api.nvim_buf_set_option(self.view_file_buffer, "filetype", original_ft)
-
-  local current_name = api.nvim_buf_get_name(self.view_file_buffer)
-  if current_name ~= new_name then
-    pcall(api.nvim_buf_set_name, self.view_file_buffer, new_name)
-  end
+-- Now that the buffer is in a stable state, set the filetype.
+local original_ft = api.nvim_get_option_value("filetype", { buf = self.original_file_buffer })
+api.nvim_buf_set_option(self.view_file_buffer, "filetype", original_ft)
 end
 
 --- Re-runs the blame for the given file at a specific commit and adds to history.
@@ -763,7 +761,8 @@ function M:reblame_without_history(commit, original_line)
   self.next_color_index = 1
   self.last_highlighted_commit = nil
 
-  self.buffer.ui:render(unpack(self:render_blame_lines()))
+  local components = self:render_blame_lines()
+  self.buffer.ui:render(Ui.col(components))
 
   -- Clear any previous status messages on successful operation
   vim.cmd("echon ''")
@@ -869,7 +868,8 @@ function M:setup_resize_handling()
         if current_width ~= self.saved_width then
           self.saved_width = current_width
           -- A resize requires a full re-render
-          self.buffer.ui:render(unpack(self:render_blame_lines()))
+          local components = self:render_blame_lines()
+          self.buffer.ui:render(Ui.col(components))
           -- Re-apply highlights after render
           self:update_hunk_highlight()
         end
