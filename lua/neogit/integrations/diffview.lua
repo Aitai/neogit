@@ -5,6 +5,7 @@ local RevType = require("diffview.vcs.rev").RevType
 local CDiffView = require("diffview.api.views.diff.diff_view").CDiffView
 local dv_lib = require("diffview.lib")
 local dv_utils = require("diffview.utils")
+local a = require("plenary.async")
 
 local Watcher = require("neogit.watcher")
 local git = require("neogit.lib.git")
@@ -41,7 +42,7 @@ local function get_local_diff_view(section_name, item_name, opts)
     section_name = "working"
   end
 
-  local function update_files(current_file_path)
+  local function update_files()
     local files = {}
 
     git.repo:dispatch_refresh {
@@ -50,9 +51,6 @@ local function get_local_diff_view(section_name, item_name, opts)
     }
 
     local repo_state = git.repo.state
-    if not repo_state then
-      return files
-    end
 
     local sections = {
       conflicting = {
@@ -67,7 +65,7 @@ local function get_local_diff_view(section_name, item_name, opts)
     for kind, section in pairs(sections) do
       files[kind] = {}
 
-      for idx, item in ipairs(section.items or {}) do
+      for _, item in ipairs(section.items or {}) do
         local file = {
           path = item.name,
           status = item.mode and item.mode:sub(1, 1),
@@ -77,14 +75,11 @@ local function get_local_diff_view(section_name, item_name, opts)
           } or nil,
           left_null = vim.tbl_contains({ "A", "?" }, item.mode),
           right_null = false,
-          selected = (current_file_path and item.name == current_file_path)
-            or (item_name and item.name == item_name)
-            or (not item_name and not current_file_path and idx == 1),
         }
 
         -- restrict diff to only a particular section
         if opts.only then
-          if (item_name and file.selected) or (not item_name and section_name == kind) then
+          if (item_name and item.name == item_name) or (not item_name and section_name == kind) then
             table.insert(files[kind], file)
           end
         else
@@ -96,8 +91,37 @@ local function get_local_diff_view(section_name, item_name, opts)
     return files
   end
 
+  -- Get the initial file list
   local files = update_files()
 
+  -- Apply the "selected" logic only to the initial list
+  local file_was_selected = false
+  if item_name then
+    for _, section in pairs(files) do
+      for _, file in ipairs(section) do
+        if file.path == item_name then
+          file.selected = true
+          file_was_selected = true
+          break
+        end
+      end
+      if file_was_selected then
+        break
+      end
+    end
+  end
+
+  -- If no specific file was requested or found, select the first file as a fallback.
+  if not file_was_selected then
+    for _, section_key in ipairs({ "conflicting", "working", "staged" }) do
+      if files[section_key] and #files[section_key] > 0 then
+        files[section_key][1].selected = true
+        break
+      end
+    end
+  end
+
+  -- Pass the initial list (with `selected` flags) and the update callback (without them)
   local view = CDiffView {
     git_root = git.repo.worktree_root,
     left = left,
@@ -119,11 +143,9 @@ local function get_local_diff_view(section_name, item_name, opts)
     end,
   }
 
-  view:on_files_staged(function()
-    vim.schedule(function()
-      Watcher.instance():dispatch_refresh()
-    end)
-  end)
+  view:on_files_staged(a.void(function(_)
+    Watcher.instance():dispatch_refresh()
+  end))
   dv_lib.add_view(view)
 
   return view
