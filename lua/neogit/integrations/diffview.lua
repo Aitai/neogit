@@ -205,6 +205,16 @@ function M.open(section_name, item_name, opts)
       return
     end
     view = dv_lib.diffview_open(dv_utils.tbl_pack(item_name .. "^!"))
+    if not check_valid_item(item_name, "commit") then
+      return
+    end
+    local args = dv_utils.tbl_pack(item_name .. "^!")
+    if opts.paths then
+      for _, path in ipairs(opts.paths) do
+        table.insert(args, "--selected-file=" .. path)
+      end
+    end
+    view = dv_lib.diffview_open(args)
   elseif section_name == "conflict" and item_name then
     view = dv_lib.diffview_open(dv_utils.tbl_pack("--selected-file=" .. item_name))
   elseif (section_name == "conflict" or section_name == "worktree") and not item_name then
