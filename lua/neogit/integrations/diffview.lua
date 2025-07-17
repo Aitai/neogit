@@ -135,10 +135,6 @@ function M.open(section_name, item_name, opts)
     local stash_id = item_name:match("stash@{%d+}")
     view = dv_lib.diffview_open(dv_utils.tbl_pack(stash_id .. "^!"))
   elseif section_name == "commit" then
-    view = dv_lib.diffview_open(dv_utils.tbl_pack(item_name .. "^!"))
-    if not check_valid_item(item_name, "commit") then
-      return
-    end
     local args = dv_utils.tbl_pack(item_name .. "^!")
     if opts.paths then
       for _, path in ipairs(opts.paths) do
