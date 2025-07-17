@@ -1018,6 +1018,19 @@ function M:open()
         ["]"] = function()
           self:go_forward()
         end,
+        d = function()
+          local line_nr = api.nvim_win_get_cursor(0)[1]
+          local entry = self:get_blame_entry_for_line(line_nr)
+          if not entry then
+            return
+          end
+          if entry.commit:match("^0+$") then
+            vim.notify("Cannot diff uncommitted changes.", vim.log.levels.INFO, { title = "Blame" })
+            return
+          end
+          local diffview = require("neogit.integrations.diffview")
+          diffview.open("commit", entry.commit, { paths = { self.file_path }, new_tab = true })
+        end,
       },
     },
     render = function()
